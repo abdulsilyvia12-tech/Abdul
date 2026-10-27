@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Blinkchat</string>
+    <string name="firestore_database_id">ai-studio-android-blinkcha-ca51b0d6-8d87-4002-b3d2-a61cc6f63709</string>
+    <string name="default_web_client_id">515710977744-dummy-web-client-id</string>
+</resources>

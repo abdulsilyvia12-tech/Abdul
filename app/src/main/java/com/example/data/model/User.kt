@@ -1,0 +1,28 @@
+package com.example.data.model
+
+data class User(
+    val id: String,
+    val username: String,
+    val displayName: String,
+    val email: String = "user@blinkchat.com",
+    val avatarUrl: String? = null,
+    val avatarColorHex: String = "#8B5CF6",
+    val bio: String = "Living in the blink of an eye ✨",
+    val streaksCount: Int = 12,
+    val postsCount: Int = 8,
+    val friendsCount: Int = 142,
+    val statusText: String = "Available ⚡",
+    val location: String = "Tokyo, Japan",
+    val coordinates: String = "35.6762° N, 139.6503° E",
+    val isOnline: Boolean = true,
+    val isGhostMode: Boolean = false,
+    val outfitName: String = "Cyber Neon Trench",
+    val outfitEmoji: String = "🧥",
+    val headwear: String = "Hologram Halo 🪖",
+    val accessory: String = "Matrix Glitch Shades 🕶️",
+    val auraGlow: String = "#8B5CF6",
+    val bannerTheme: String = "Synthwave Tokyo Night 🌆",
+    val vipBadge: String = "⚡ VIP Creator",
+    val profileLevel: Int = 5,
+    val profileXp: Int = 850
+)

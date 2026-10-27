@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Blinkchat Firestore Schema",
+  "entities": {
+    "User": {
+      "collection": "users",
+      "path": "/users/{userId}",
+      "fields": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "avatarColorHex": { "type": "string" },
+        "bio": { "type": "string" },
+        "streaksCount": { "type": "number" },
+        "postsCount": { "type": "number" },
+        "friendsCount": { "type": "number" },
+        "statusText": { "type": "string" },
+        "isOnline": { "type": "boolean" },
+        "isGhostMode": { "type": "boolean" },
+        "createdAt": { "type": "timestamp" },
+        "updatedAt": { "type": "timestamp" }
+      }
+    },
+    "Post": {
+      "collection": "posts",
+      "path": "/posts/{postId}",
+      "fields": {
+        "id": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorAvatarColor": { "type": "string" },
+        "imageUri": { "type": "string" },
+        "caption": { "type": "string" },
+        "filterTag": { "type": "string" },
+        "likesCount": { "type": "number" },
+        "commentsCount": { "type": "number" },
+        "createdAt": { "type": "timestamp" }
+      }
+    },
+    "Comment": {
+      "collection": "comments",
+      "path": "/comments/{commentId}",
+      "fields": {
+        "id": { "type": "string" },
+        "postId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "text": { "type": "string" },
+        "likesCount": { "type": "number" },
+        "createdAt": { "type": "timestamp" }
+      }
+    },
+    "Message": {
+      "collection": "messages",
+      "path": "/messages/{messageId}",
+      "fields": {
+        "id": { "type": "string" },
+        "conversationId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "text": { "type": "string" },
+        "mediaUri": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "isBlink": { "type": "boolean" },
+        "blinkSecondsRemaining": { "type": "number" },
+        "createdAt": { "type": "timestamp" }
+      }
+    },
+    "Report": {
+      "collection": "reports",
+      "path": "/reports/{reportId}",
+      "fields": {
+        "id": { "type": "string" },
+        "reporterId": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetPostId": { "type": "string" },
+        "reason": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "timestamp" }
+      }
+    }
+  }
+}

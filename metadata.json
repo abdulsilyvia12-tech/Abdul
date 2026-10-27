@@ -1,0 +1,6 @@
+{
+  "name": "Blinkchat",
+  "description": "Social communication app to chat, create Blinks with creative filters, connect with friends worldwide, and get AI assistance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
