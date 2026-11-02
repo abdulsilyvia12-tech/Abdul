@@ -6,6 +6,9 @@ import com.example.R
 import com.example.data.ai.BlinkAiService
 import com.example.data.cache.BlinkOfflineCache
 import com.example.data.model.*
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -1770,6 +1773,36 @@ class BlinkRepository(private val context: Context? = null) {
         return true
     }
 
+    fun loginWithFirebase(firebaseUser: FirebaseUser): User {
+        val email = firebaseUser.email ?: ""
+        val displayName = firebaseUser.displayName?.ifBlank { null }
+            ?: if (email.contains("@")) email.substringBefore("@").replaceFirstChar { it.uppercase() } else "Blink User"
+        val username = if (email.contains("@")) email.substringBefore("@").lowercase() else "user_${firebaseUser.uid.take(6)}"
+
+        val existing = _allUsers.value.find { it.id == firebaseUser.uid || (it.email.isNotBlank() && it.email.equals(email, ignoreCase = true)) }
+        if (existing != null) {
+            val updated = existing.copy(id = firebaseUser.uid, displayName = displayName)
+            _currentUser.value = updated
+            return updated
+        }
+
+        val newUser = User(
+            id = firebaseUser.uid,
+            username = username,
+            displayName = displayName,
+            email = email,
+            avatarColorHex = "#8B5CF6",
+            bio = "Verified via Firebase Authentication ⚡",
+            streaksCount = 1,
+            postsCount = 0,
+            friendsCount = 5,
+            isOnline = true
+        )
+        _allUsers.update { it + newUser }
+        _currentUser.value = newUser
+        return newUser
+    }
+
     fun switchUser(userId: String) {
         val target = _allUsers.value.find { it.id == userId }
         if (target != null) {
@@ -1778,6 +1811,9 @@ class BlinkRepository(private val context: Context? = null) {
     }
 
     fun logout() {
+        try {
+            Firebase.auth.signOut()
+        } catch (_: Exception) {}
         _currentUser.value = null
     }
 

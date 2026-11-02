@@ -20,6 +20,8 @@ import com.example.data.repository.BlinkRepository
 import com.example.ui.components.*
 import com.example.ui.screens.*
 import com.example.ui.theme.MyApplicationTheme
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
 
 class MainActivity : ComponentActivity() {
     private val repository by lazy { BlinkRepository(applicationContext) }
@@ -118,11 +120,22 @@ fun BlinkApp(repository: BlinkRepository) {
         return
     }
 
-    // --- Universal Login Portal for Everyone & Customers ---
+    // Auto-restore authenticated Firebase user session on app launch
+    LaunchedEffect(Unit) {
+        val fbUser = Firebase.auth.currentUser
+        if (fbUser != null && currentUser == null) {
+            repository.loginWithFirebase(fbUser)
+        }
+    }
+
+    // --- Firebase Authentication & Customer Portal ---
     if (currentUser == null) {
         AuthScreen(
             onLoginSuccess = { identifier ->
                 repository.login(identifier)
+            },
+            onFirebaseLoginSuccess = { firebaseUser ->
+                repository.loginWithFirebase(firebaseUser)
             },
             onCreateAccountSuccess = { username, displayName, email, bio ->
                 repository.createAccount(username, displayName, email, bio)
