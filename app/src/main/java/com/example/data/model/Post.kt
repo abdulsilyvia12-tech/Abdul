@@ -16,7 +16,11 @@ data class Post(
     val commentsCount: Int = 0,
     val isLiked: Boolean = false,
     val isSaved: Boolean = false,
-    val audience: String = "Everyone" // Everyone, Friends, Close Friends
+    val audience: String = "Everyone", // Everyone, Friends, Close Friends
+    val reactions: Map<String, Int> = emptyMap(),
+    val userReaction: String? = null,
+    val sharesCount: Int = 0,
+    val isVerified: Boolean = false
 )
 
 data class Story(

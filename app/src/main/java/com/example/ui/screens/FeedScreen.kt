@@ -50,24 +50,45 @@ fun FeedScreen(
     stories: List<Story>,
     posts: List<Post>,
     commentsMap: Map<String, List<Comment>>,
+    conversations: List<Conversation> = emptyList(),
     onLikePost: (String) -> Unit,
+    onReactionClick: (postId: String, emoji: String) -> Unit = { _, _ -> },
     onSavePost: (String) -> Unit,
     onAddComment: (postId: String, text: String) -> Unit,
+    onSharePostToConversation: (postId: String, conversationId: String) -> Unit = { _, _ -> },
+    onFollowCreator: (username: String) -> Unit = {},
     onOpenStory: (Story) -> Unit,
     onAddStoryClick: () -> Unit,
     onCreatePostClick: () -> Unit,
     onBlockUser: (User) -> Unit,
-    onReportPost: (postId: String, authorName: String) -> Unit
+    onReportPost: (postId: String, authorName: String) -> Unit,
+    onUseTrendingSound: (String) -> Unit = {}
 ) {
     var activeCommentPostId by remember { mutableStateOf<String?>(null) }
     var reportingPost by remember { mutableStateOf<Post?>(null) }
     var blockingUser by remember { mutableStateOf<User?>(null) }
+    var sharingPost by remember { mutableStateOf<Post?>(null) }
     var filterMode by remember { mutableStateOf(FeedFilterMode.ALL) }
+    var selectedHashtag by remember { mutableStateOf<String?>(null) }
+    var snackbarMessage by remember { mutableStateOf<String?>(null) }
 
-    val displayedPosts = when (filterMode) {
+    val basePosts = when (filterMode) {
         FeedFilterMode.ALL -> posts
         FeedFilterMode.SAVED -> posts.filter { it.isSaved }
     }
+
+    val displayedPosts = remember(basePosts, selectedHashtag) {
+        if (selectedHashtag.isNullOrBlank()) {
+            basePosts
+        } else {
+            val tag = selectedHashtag!!.lowercase()
+            basePosts.filter { post ->
+                post.caption.lowercase().contains("#$tag") ||
+                post.filterTag.lowercase().contains(tag)
+            }
+        }
+    }
+
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -251,6 +272,17 @@ fun FeedScreen(
                 }
             }
 
+            // --- Social Explore & Trending Hub (Hashtags, Creators, Sounds) ---
+            item {
+                ExploreTrendingHub(
+                    selectedTag = selectedHashtag,
+                    onSelectTag = { tag -> selectedHashtag = tag },
+                    onFollowCreator = onFollowCreator,
+                    onUseTrendingSound = onUseTrendingSound
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
             // --- Main Posts Feed ---
             if (displayedPosts.isEmpty()) {
                 item {
@@ -261,7 +293,9 @@ fun FeedScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (filterMode == FeedFilterMode.SAVED) "No saved Blinks yet." else "No posts yet. Capture a Blink to get started!",
+                            text = if (filterMode == FeedFilterMode.SAVED) "No saved Blinks yet." 
+                                   else if (selectedHashtag != null) "No posts found for #$selectedHashtag" 
+                                   else "No posts yet. Capture a Blink to get started!",
                             textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -272,6 +306,8 @@ fun FeedScreen(
                     PostCard(
                         post = post,
                         onLike = { onLikePost(post.id) },
+                        onReaction = { emoji -> onReactionClick(post.id, emoji) },
+                        onShareClick = { sharingPost = post },
                         onSave = { onSavePost(post.id) },
                         onCommentClick = { activeCommentPostId = post.id },
                         onReportClick = { reportingPost = post },
@@ -311,6 +347,25 @@ fun FeedScreen(
             }
         }
 
+        // Share Post Bottom Sheet
+        if (sharingPost != null) {
+            SharePostDialog(
+                post = sharingPost!!,
+                conversations = conversations,
+                onDismiss = { sharingPost = null },
+                onShareToConversation = { convId ->
+                    onSharePostToConversation(sharingPost!!.id, convId)
+                    snackbarMessage = "Shared to direct message! ✨"
+                },
+                onAddToStory = {
+                    onAddStoryClick()
+                },
+                onCopyLink = {
+                    snackbarMessage = "Post link copied to clipboard! 📋"
+                }
+            )
+        }
+
         // Comments Bottom Sheet
         if (activeCommentPostId != null) {
             val postId = activeCommentPostId!!
@@ -346,13 +401,32 @@ fun FeedScreen(
                 }
             )
         }
+
+        // Social snackbar feedback
+        if (snackbarMessage != null) {
+            Snackbar(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 80.dp, start = 16.dp, end = 16.dp),
+                action = {
+                    TextButton(onClick = { snackbarMessage = null }) {
+                        Text("Dismiss", color = Color.White)
+                    }
+                }
+            ) {
+                Text(snackbarMessage!!)
+            }
+        }
     }
 }
+
 
 @Composable
 fun PostCard(
     post: Post,
     onLike: () -> Unit,
+    onReaction: (emoji: String) -> Unit = {},
+    onShareClick: () -> Unit = {},
     onSave: () -> Unit,
     onCommentClick: () -> Unit,
     onReportClick: () -> Unit,
@@ -360,7 +434,9 @@ fun PostCard(
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var showBigHeart by remember { mutableStateOf(false) }
+    var showReactionsPicker by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+    val quickEmojis = remember { listOf("❤️", "🔥", "😂", "⚡", "😍", "👏") }
 
     Card(
         modifier = Modifier
@@ -397,6 +473,15 @@ fun PostCard(
                                 fontSize = 14.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                            if (post.isVerified) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Verified Creator",
+                                    tint = BlinkCyanLight,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                             Spacer(modifier = Modifier.width(6.dp))
 
                             // Filter Badge tag
@@ -469,7 +554,7 @@ fun PostCard(
                     .pointerInput(Unit) {
                         detectTapGestures(
                             onDoubleTap = {
-                                if (!post.isLiked) onLike()
+                                onReaction("❤️")
                                 showBigHeart = true
                                 coroutineScope.launch {
                                     delay(800)
@@ -560,15 +645,90 @@ fun PostCard(
                 }
             }
 
+            // Quick Multi-Emoji Reactions Bar (Expandable)
+            AnimatedVisibility(visible = showReactionsPicker) {
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceAround,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        quickEmojis.forEach { emoji ->
+                            val isSelected = post.userReaction == emoji
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isSelected) BlinkPrimary.copy(alpha = 0.25f) else Color.Transparent,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clickable {
+                                        onReaction(emoji)
+                                        showReactionsPicker = false
+                                    }
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(text = emoji, fontSize = 20.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Social Reaction Chips Display Row
+            if (post.reactions.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(post.reactions.entries.toList()) { (emoji, count) ->
+                        val isUserReacted = post.userReaction == emoji
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isUserReacted) BlinkPrimary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = if (isUserReacted) androidx.compose.foundation.BorderStroke(1.dp, BlinkPrimary) else null,
+                            modifier = Modifier
+                                .clickable { onReaction(emoji) }
+                                .testTag("reaction_${post.id}_$emoji")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(text = emoji, fontSize = 13.sp)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "$count",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isUserReacted) BlinkPrimaryLight else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Interaction Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Like button
                     IconButton(
                         onClick = onLike,
                         modifier = Modifier.testTag("like_button_${post.id}")
@@ -587,7 +747,18 @@ fun PostCard(
                         color = MaterialTheme.colorScheme.onSurface
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                    // Emoji reactions toggle button
+                    IconButton(
+                        onClick = { showReactionsPicker = !showReactionsPicker },
+                        modifier = Modifier.testTag("reaction_picker_button_${post.id}")
+                    ) {
+                        Text(
+                            text = post.userReaction ?: "⚡",
+                            fontSize = 16.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     IconButton(
                         onClick = onCommentClick,
@@ -607,14 +778,25 @@ fun PostCard(
                         color = MaterialTheme.colorScheme.onSurface
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
 
-                    IconButton(onClick = { /* Share dialog */ }) {
+                    IconButton(
+                        onClick = onShareClick,
+                        modifier = Modifier.testTag("share_button_${post.id}")
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Outlined.Send,
                             contentDescription = "Share",
                             tint = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    if (post.sharesCount > 0) {
+                        Text(
+                            text = "${post.sharesCount}",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }

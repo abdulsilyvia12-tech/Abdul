@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-blinkcha-ca51b0d6-8d87-4002-b3d2-a61cc6f63709</string>
+    <string name="recaptcha_site_key" translatable="false">6LcSTQUuAAAAADmvEATmZEPs-GDVxUWUiue4E2C4</string>
+</resources>

@@ -1,85 +1,68 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Blinkchat Firestore Schema",
   "entities": {
-    "User": {
-      "collection": "users",
-      "path": "/users/{userId}",
-      "fields": {
-        "userId": { "type": "string" },
-        "username": { "type": "string" },
-        "displayName": { "type": "string" },
-        "email": { "type": "string" },
-        "avatarColorHex": { "type": "string" },
-        "bio": { "type": "string" },
-        "streaksCount": { "type": "number" },
-        "postsCount": { "type": "number" },
-        "friendsCount": { "type": "number" },
-        "statusText": { "type": "string" },
-        "isOnline": { "type": "boolean" },
-        "isGhostMode": { "type": "boolean" },
-        "createdAt": { "type": "timestamp" },
-        "updatedAt": { "type": "timestamp" }
-      }
-    },
-    "Post": {
-      "collection": "posts",
-      "path": "/posts/{postId}",
-      "fields": {
+    "MatchQueueEntry": {
+      "title": "MatchQueueEntry",
+      "description": "Represents an anonymous user waiting in the matchmaking queue for random Blink chat",
+      "type": "object",
+      "properties": {
         "id": { "type": "string" },
-        "authorId": { "type": "string" },
-        "authorName": { "type": "string" },
-        "authorUsername": { "type": "string" },
-        "authorAvatarColor": { "type": "string" },
-        "imageUri": { "type": "string" },
-        "caption": { "type": "string" },
-        "filterTag": { "type": "string" },
-        "likesCount": { "type": "number" },
-        "commentsCount": { "type": "number" },
-        "createdAt": { "type": "timestamp" }
-      }
+        "anonymousId": { "type": "string" },
+        "anonymousName": { "type": "string" },
+        "anonymousAvatarColor": { "type": "string" },
+        "status": { "type": "string", "enum": ["waiting", "matched", "cancelled"] },
+        "matchedChatId": { "type": "string" },
+        "peerAnonymousName": { "type": "string" },
+        "peerAvatarColor": { "type": "string" },
+        "joinedAt": { "type": "number" }
+      },
+      "required": ["id", "anonymousId", "status", "joinedAt"]
     },
-    "Comment": {
-      "collection": "comments",
-      "path": "/comments/{commentId}",
-      "fields": {
+    "ActiveRandomChat": {
+      "title": "ActiveRandomChat",
+      "description": "Active real-time anonymous random chat pairing two users",
+      "type": "object",
+      "properties": {
         "id": { "type": "string" },
-        "postId": { "type": "string" },
-        "authorId": { "type": "string" },
-        "authorName": { "type": "string" },
-        "authorUsername": { "type": "string" },
-        "text": { "type": "string" },
-        "likesCount": { "type": "number" },
-        "createdAt": { "type": "timestamp" }
-      }
+        "participantA": { "type": "string" },
+        "participantB": { "type": "string" },
+        "participantAName": { "type": "string" },
+        "participantBName": { "type": "string" },
+        "participantAAvatar": { "type": "string" },
+        "participantBAvatar": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "skipped", "ended", "reported"] },
+        "createdAt": { "type": "number" },
+        "expiresAt": { "type": "number" },
+        "lastMessage": { "type": "string" }
+      },
+      "required": ["id", "participantA", "participantB", "status", "createdAt", "expiresAt"]
     },
-    "Message": {
-      "collection": "messages",
-      "path": "/messages/{messageId}",
-      "fields": {
+    "RandomChatMessage": {
+      "title": "RandomChatMessage",
+      "description": "A real-time message exchanged within an active anonymous random chat",
+      "type": "object",
+      "properties": {
         "id": { "type": "string" },
-        "conversationId": { "type": "string" },
+        "chatId": { "type": "string" },
         "senderId": { "type": "string" },
+        "senderAnonymousName": { "type": "string" },
         "text": { "type": "string" },
-        "mediaUri": { "type": "string" },
-        "mediaType": { "type": "string" },
-        "isBlink": { "type": "boolean" },
-        "blinkSecondsRemaining": { "type": "number" },
-        "createdAt": { "type": "timestamp" }
-      }
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "chatId", "senderId", "text", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/match_queue/{queueId}": {
+      "schema": { "$ref": "#/entities/MatchQueueEntry" },
+      "description": "Queue entries for users seeking random anonymous chat pairing"
     },
-    "Report": {
-      "collection": "reports",
-      "path": "/reports/{reportId}",
-      "fields": {
-        "id": { "type": "string" },
-        "reporterId": { "type": "string" },
-        "targetUserId": { "type": "string" },
-        "targetPostId": { "type": "string" },
-        "reason": { "type": "string" },
-        "details": { "type": "string" },
-        "createdAt": { "type": "timestamp" }
-      }
+    "/active_chats/{chatId}": {
+      "schema": { "$ref": "#/entities/ActiveRandomChat" },
+      "description": "Active random 2-minute chat session between paired users"
+    },
+    "/active_chats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/RandomChatMessage" },
+      "description": "Real-time messages sent within an active random anonymous chat"
     }
   }
 }

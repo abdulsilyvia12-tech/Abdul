@@ -42,8 +42,10 @@ import com.example.R
 import com.example.data.model.Post
 import com.example.data.model.User
 import com.example.ui.components.AvatarBadge
+import com.example.ui.components.FollowersListDialog
 import com.example.ui.components.FriendRequestsDialog
 import com.example.ui.components.ProfileDressingDialog
+import com.example.ui.components.SocialUserItem
 import com.example.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -74,8 +76,29 @@ fun ProfileScreen(
     var showDressingDialog by remember { mutableStateOf(false) }
     var showFriendNetworkDialog by remember { mutableStateOf(false) }
     var showLocationDialog by remember { mutableStateOf(false) }
+    var showFollowersDialog by remember { mutableStateOf(false) }
+    var showFollowingDialog by remember { mutableStateOf(false) }
+    var showShareProfileSnackbar by remember { mutableStateOf(false) }
     var isDetectingLocation by remember { mutableStateOf(false) }
     var customCityInput by remember { mutableStateOf("") }
+
+    val sampleFollowers = remember {
+        listOf(
+            SocialUserItem("u_1", "Maya Lin", "mayalin", "#EC4899", "Tokyo aesthetic & DJ sets ✨", isVerified = true, isFollowing = true),
+            SocialUserItem("u_2", "Kai Storm", "kaistorm", "#06B6D4", "Phonk producer & speed enthusiast ⚡", isVerified = true, isFollowing = true),
+            SocialUserItem("u_3", "Zane Vance", "zanevance", "#10B981", "Synthwave artist 🌆", isVerified = true, isFollowing = false),
+            SocialUserItem("u_4", "Elena Vance", "elenavance", "#8B5CF6", "Visual effects & street style 🎨", isVerified = false, isFollowing = false),
+            SocialUserItem("u_5", "Liam Harper", "liamharper", "#F59E0B", "Film skater London 🛹", isVerified = false, isFollowing = true)
+        )
+    }
+
+    val sampleFollowing = remember {
+        listOf(
+            SocialUserItem("u_1", "Maya Lin", "mayalin", "#EC4899", "Tokyo aesthetic & DJ sets ✨", isVerified = true, isFollowing = true),
+            SocialUserItem("u_2", "Kai Storm", "kaistorm", "#06B6D4", "Phonk producer & speed enthusiast ⚡", isVerified = true, isFollowing = true),
+            SocialUserItem("u_5", "Liam Harper", "liamharper", "#F59E0B", "Film skater London 🛹", isVerified = false, isFollowing = true)
+        )
+    }
 
     // Edit fields
     var editName by remember { mutableStateOf(user.displayName) }
@@ -272,13 +295,27 @@ fun ProfileScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Name & Username
-        Text(
-            text = user.displayName,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground
-        )
+        // Name & Username with Verified Creator Badge
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = user.displayName,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            if (user.isVerified) {
+                Spacer(modifier = Modifier.width(5.dp))
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "Verified Creator",
+                    tint = BlinkCyanLight,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+        }
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -398,9 +435,51 @@ fun ProfileScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        // Social Media Showcase Links
+        if (user.socialLinks.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp, start = 8.dp, end = 8.dp),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                user.socialLinks.forEach { link ->
+                    val (iconEmoji, label) = when {
+                        link.contains("instagram") -> "📸" to "@alex.chen"
+                        link.contains("tiktok") -> "🎵" to "@alextravels"
+                        link.contains("youtube") -> "▶️" to "AlexChenVlogs"
+                        else -> "🔗" to "Link"
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                        modifier = Modifier
+                            .padding(horizontal = 4.dp)
+                            .clickable { showShareProfileSnackbar = true }
+                            .testTag("social_link_$label")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = iconEmoji, fontSize = 11.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = label,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+        }
 
-        // Stats Row (Streaks, Blinks & Posts, Friends)
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Social Media Stats Row (Followers, Following, Blinks, Streaks)
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -410,24 +489,51 @@ fun ProfileScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 14.dp),
+                    .padding(vertical = 14.dp, horizontal = 6.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .clickable { showFollowersDialog = true }
+                        .testTag("stat_followers_count")
+                ) {
                     Text(
-                        text = "🔥 ${user.streaksCount}",
+                        text = "${user.followersCount}",
                         fontWeight = FontWeight.Black,
-                        fontSize = 18.sp,
-                        color = BlinkAmber
+                        fontSize = 17.sp,
+                        color = BlinkCyanLight
                     )
-                    Text(text = "Streak Days", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(text = "Followers", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
                 Box(
                     modifier = Modifier
                         .width(1.dp)
-                        .height(30.dp)
+                        .height(28.dp)
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                )
+
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .clickable { showFollowingDialog = true }
+                        .testTag("stat_following_count")
+                ) {
+                    Text(
+                        text = "${user.followingCount}",
+                        fontWeight = FontWeight.Black,
+                        fontSize = 17.sp,
+                        color = BlinkPrimaryLight
+                    )
+                    Text(text = "Following", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(28.dp)
                         .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
                 )
 
@@ -435,30 +541,31 @@ fun ProfileScreen(
                     Text(
                         text = "${user.postsCount}",
                         fontWeight = FontWeight.Black,
-                        fontSize = 18.sp,
-                        color = BlinkPrimaryLight
+                        fontSize = 17.sp,
+                        color = BlinkPinkLight
                     )
-                    Text(text = "Blinks & Posts", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(text = "Blinks", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
                 Box(
                     modifier = Modifier
                         .width(1.dp)
-                        .height(30.dp)
+                        .height(28.dp)
                         .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
                 )
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "${user.friendsCount}",
+                        text = "🔥 ${user.streaksCount}",
                         fontWeight = FontWeight.Black,
-                        fontSize = 18.sp,
-                        color = BlinkCyanLight
+                        fontSize = 17.sp,
+                        color = BlinkAmber
                     )
-                    Text(text = "Friends", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(text = "Streak", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
+
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -597,10 +704,10 @@ fun ProfileScreen(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Action Buttons Row
+        // Action Buttons Row (Edit, Share Profile, Safety Center)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
                 onClick = {
@@ -617,9 +724,23 @@ fun ProfileScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Edit Profile", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Edit", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Button(
+                onClick = { showShareProfileSnackbar = true },
+                modifier = Modifier
+                    .weight(1.3f)
+                    .height(44.dp)
+                    .testTag("share_profile_button"),
+                colors = ButtonDefaults.buttonColors(containerColor = BlinkCyan.copy(alpha = 0.15f)),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Share, contentDescription = null, tint = BlinkCyanLight, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Share Profile", color = BlinkCyanLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
 
             Button(
@@ -631,9 +752,9 @@ fun ProfileScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = BlinkPrimary.copy(alpha = 0.15f)),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(Icons.Default.Security, contentDescription = null, tint = BlinkPrimaryLight, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Safety Center", color = BlinkPrimaryLight, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Icon(Icons.Default.Security, contentDescription = null, tint = BlinkPrimaryLight, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Safety", color = BlinkPrimaryLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -984,6 +1105,69 @@ fun ProfileScreen(
             onSendFriendRequest = onSendFriendRequest ?: { false },
             onAcceptFriendRequest = onAcceptFriendRequest ?: { false },
             onDeclineFriendRequest = onDeclineFriendRequest ?: { false }
+        )
+    }
+
+    // --- Interactive Followers Showcase Dialog ---
+    if (showFollowersDialog) {
+        FollowersListDialog(
+            title = "Followers (${user.followersCount})",
+            initialUsers = sampleFollowers,
+            onDismiss = { showFollowersDialog = false }
+        )
+    }
+
+    // --- Interactive Following Showcase Dialog ---
+    if (showFollowingDialog) {
+        FollowersListDialog(
+            title = "Following (${user.followingCount})",
+            initialUsers = sampleFollowing,
+            onDismiss = { showFollowingDialog = false }
+        )
+    }
+
+    // --- Share Profile Feedback Dialog ---
+    if (showShareProfileSnackbar) {
+        AlertDialog(
+            onDismissRequest = { showShareProfileSnackbar = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Share, contentDescription = null, tint = BlinkCyanLight)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Share Profile 🔗", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Share @${user.username}'s Blinkchat profile with friends or across social media:",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "https://blinkchat.social/@${user.username}",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = BlinkCyanLight,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showShareProfileSnackbar = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = BlinkPrimary)
+                ) {
+                    Text("Copy & Done ✨")
+                }
+            }
         )
     }
 }

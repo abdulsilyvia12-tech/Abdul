@@ -74,6 +74,7 @@ fun BlinkVideosScreen(
     val filteredVideos = remember(videos, selectedCategory) {
         when (selectedCategory) {
             VideoCategory.ALL -> videos
+            VideoCategory.PHONK -> videos.filter { it.category == VideoCategory.PHONK || it.musicTrack.contains("phonk", true) || it.musicTrack.contains("kordhell", true) || it.musicTrack.contains("dvrst", true) || it.musicTrack.contains("drift", true) }
             VideoCategory.DRAMATIC -> videos.filter { it.category == VideoCategory.DRAMATIC }
             VideoCategory.FUNNY -> videos.filter { it.category == VideoCategory.FUNNY }
             VideoCategory.MUSIC -> videos.filter { it.category == VideoCategory.MUSIC }
@@ -194,10 +195,11 @@ fun BlinkVideosScreen(
             ) {
                 listOf(
                     VideoCategory.ALL to "All",
+                    VideoCategory.PHONK to "🏎️ Phonk",
+                    VideoCategory.MUSIC to "🎵 Music",
                     VideoCategory.DRAMATIC to "🎭 Dramatic",
                     VideoCategory.FUNNY to "😂 Funny",
-                    VideoCategory.MUSIC to "🎵 Music",
-                    VideoCategory.BONGO to "🌴 Bongo Flava",
+                    VideoCategory.BONGO to "🎤 Pop Hits",
                     VideoCategory.BLINKS to "⚡ Blinks",
                     VideoCategory.COMMUNITY to "👥 Community"
                 ).forEach { (cat, label) ->

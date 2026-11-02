@@ -40,6 +40,9 @@ data class BlockedUser(
 
 enum class FilterCategory(val label: String, val icon: String) {
     ALL("All", "⚡"),
+    LENSES("Snap Lenses", "✨"),
+    BEAUTY("Beauty & Face", "💄"),
+    SHADERS("GPU Shaders", "🌈"),
     FUNNY_FACES("Funny Faces", "🤪"),
     GAMES("Funny Games", "🎮"),
     AESTHETIC("Aesthetic", "🔮"),
@@ -60,5 +63,12 @@ data class CreativeFilter(
     val category: FilterCategory = FilterCategory.ALL,
     val funnyFaceType: String = "",
     val gameType: String = "",
-    val overlayTitle: String = ""
+    val overlayTitle: String = "",
+    val shaderType: com.example.ui.camera.filters.CameraShaderType = com.example.ui.camera.filters.CameraShaderType.NONE,
+    val defaultIntensity: Float = 0.85f,
+    val arLensType: String = "",
+    val beautySmoothing: Float = 0f,
+    val blushIntensity: Float = 0f,
+    val hasSparkles: Boolean = false,
+    val isLense: Boolean = false
 )

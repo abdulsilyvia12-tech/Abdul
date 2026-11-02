@@ -8,8 +8,11 @@ import com.example.data.cache.BlinkOfflineCache
 import com.example.data.model.*
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -89,6 +92,10 @@ class BlinkRepository(private val context: Context? = null) {
     // Friend Requests (Firestore Synchronized)
     private val _friendRequests = MutableStateFlow<List<FriendRequest>>(emptyList())
     val friendRequests: StateFlow<List<FriendRequest>> = _friendRequests.asStateFlow()
+
+    // Social Notifications Activity Feed
+    private val _notifications = MutableStateFlow<List<SocialNotification>>(emptyList())
+    val notifications: StateFlow<List<SocialNotification>> = _notifications.asStateFlow()
 
     // Active Call State
     data class CallState(
@@ -327,7 +334,7 @@ class BlinkRepository(private val context: Context? = null) {
             )
         )
 
-        // Initial Posts
+        // Initial Posts with Rich Social Reactions & Verified Creator Tags
         _posts.value = listOf(
             Post(
                 id = "post_1",
@@ -336,12 +343,16 @@ class BlinkRepository(private val context: Context? = null) {
                 authorUsername = userKai.username,
                 authorAvatarColor = userKai.avatarColorHex,
                 imageDrawableRes = R.drawable.feed_cyber_snap_1792586101459,
-                caption = "Caught in the electric frequency of downtown streets. Cyberpunk filter on point tonight! ⚡🌃",
+                caption = "Caught in the electric frequency of downtown streets. Cyberpunk filter on point tonight! ⚡🌃 #cyberpunk #tokyo",
                 filterTag = "Cyberpunk Neon",
                 timeAgo = "18m ago",
                 likesCount = 84,
                 commentsCount = 12,
-                isLiked = true
+                sharesCount = 18,
+                isLiked = true,
+                isVerified = true,
+                reactions = mapOf("❤️" to 42, "🔥" to 28, "⚡" to 14),
+                userReaction = "⚡"
             ),
             Post(
                 id = "post_2",
@@ -350,12 +361,129 @@ class BlinkRepository(private val context: Context? = null) {
                 authorUsername = userMaya.username,
                 authorAvatarColor = userMaya.avatarColorHex,
                 imageDrawableRes = R.drawable.feed_sunset_snap_1792586114190,
-                caption = "Unfiltered laughter and golden hour sounds at Rooftop Sunset Sessions 🌇✨ Tag your concert buddies!",
+                caption = "Unfiltered laughter and golden hour sounds at Rooftop Sunset Sessions 🌇✨ Tag your concert buddies! #sunset #vibes #music",
                 filterTag = "Sunset Glow",
                 timeAgo = "2h ago",
                 likesCount = 142,
                 commentsCount = 26,
-                isLiked = false
+                sharesCount = 34,
+                isLiked = false,
+                isVerified = true,
+                reactions = mapOf("❤️" to 95, "😍" to 32, "🌅" to 15)
+            ),
+            Post(
+                id = "post_3",
+                authorId = userZane.id,
+                authorName = userZane.displayName,
+                authorUsername = userZane.username,
+                authorAvatarColor = userZane.avatarColorHex,
+                imageDrawableRes = R.drawable.feed_cyber_snap_1792586101459,
+                caption = "Berlin underground warehouse set went completely crazy tonight! Audio-reactive visuals dialed in 🎛️⚡ #phonk #techno #berlin",
+                filterTag = "Emerald Matrix",
+                timeAgo = "3h ago",
+                likesCount = 215,
+                commentsCount = 38,
+                sharesCount = 52,
+                isLiked = true,
+                isVerified = true,
+                reactions = mapOf("🔥" to 110, "⚡" to 75, "🎧" to 30),
+                userReaction = "🔥"
+            ),
+            Post(
+                id = "post_4",
+                authorId = userLiam.id,
+                authorName = userLiam.displayName,
+                authorUsername = userLiam.username,
+                authorAvatarColor = userLiam.avatarColorHex,
+                imageDrawableRes = R.drawable.feed_sunset_snap_1792586114190,
+                caption = "Golden hour street skate line through Southbank. 35mm film tones hitting just right 🛹☀️ #skate #london #goldenhour",
+                filterTag = "Vintage Kodachrome",
+                timeAgo = "5h ago",
+                likesCount = 178,
+                commentsCount = 22,
+                sharesCount = 29,
+                isLiked = false,
+                isVerified = false,
+                reactions = mapOf("🛹" to 82, "🔥" to 51, "❤️" to 45)
+            )
+        )
+
+        // Social Notifications Activity Feed
+        _notifications.value = listOf(
+            SocialNotification(
+                id = "notif_1",
+                type = NotificationType.LIKE,
+                actorName = userMaya.displayName,
+                actorUsername = userMaya.username,
+                actorAvatarColor = userMaya.avatarColorHex,
+                title = "liked your video",
+                description = "Blinding Lights City Night ✨",
+                timeAgo = "12m ago",
+                targetVideoId = "vid_pop_2"
+            ),
+            SocialNotification(
+                id = "notif_2",
+                type = NotificationType.FOLLOW,
+                actorName = userKai.displayName,
+                actorUsername = userKai.username,
+                actorAvatarColor = userKai.avatarColorHex,
+                title = "started following you",
+                description = "Tap to view profile and follow back",
+                timeAgo = "28m ago",
+                isFollowedBack = false
+            ),
+            SocialNotification(
+                id = "notif_3",
+                type = NotificationType.COMMENT,
+                actorName = userElena.displayName,
+                actorUsername = userElena.username,
+                actorAvatarColor = userElena.avatarColorHex,
+                title = "commented on your post",
+                description = "\"The reflection on the street is pure cinema 🔥\"",
+                timeAgo = "1h ago",
+                targetPostId = "post_1"
+            ),
+            SocialNotification(
+                id = "notif_4",
+                type = NotificationType.STREAK_ALERT,
+                actorName = userMaya.displayName,
+                actorUsername = userMaya.username,
+                actorAvatarColor = userMaya.avatarColorHex,
+                title = "🔥 42-Day Streak is expiring soon!",
+                description = "Send a Blink to Maya Lin within 4 hours to keep your streak alive ⚡",
+                timeAgo = "2h ago"
+            ),
+            SocialNotification(
+                id = "notif_5",
+                type = NotificationType.LIKE,
+                actorName = userZane.displayName,
+                actorUsername = userZane.username,
+                actorAvatarColor = userZane.avatarColorHex,
+                title = "liked your post",
+                description = "Electric frequency in downtown streets ⚡",
+                timeAgo = "3h ago",
+                targetPostId = "post_1"
+            ),
+            SocialNotification(
+                id = "notif_6",
+                type = NotificationType.MENTION,
+                actorName = userSophia.displayName,
+                actorUsername = userSophia.username,
+                actorAvatarColor = userSophia.avatarColorHex,
+                title = "mentioned you in a video",
+                description = "\"Check out these new shader experiments with @alex 🎨✨\"",
+                timeAgo = "5h ago"
+            ),
+            SocialNotification(
+                id = "notif_7",
+                type = NotificationType.FOLLOW,
+                actorName = userLiam.displayName,
+                actorUsername = userLiam.username,
+                actorAvatarColor = userLiam.avatarColorHex,
+                title = "started following you",
+                description = "Tap to view profile",
+                timeAgo = "1d ago",
+                isFollowedBack = true
             )
         )
 
@@ -548,18 +676,191 @@ class BlinkRepository(private val context: Context? = null) {
 
         // Seeded Scrolling Videos (Blink Videos & Community User Posts)
         _videos.value = listOf(
-            // 🌴 Bongo Flava & Afrobeats
+            // 🏎️ Phonk & Drift (High-Octane 808 & Cowbell Bass Drops)
             BlinkVideo(
-                id = "vid_bongo_1",
+                id = "vid_phonk_1",
+                authorId = userKai.id,
+                authorName = userKai.displayName,
+                authorUsername = userKai.username,
+                authorAvatarColor = userKai.avatarColorHex,
+                title = "Midnight Tokyo Highway Drift 🏎️💨",
+                caption = "Full throttle around the C1 loop under rainy neon signs! That 808 cowbell drop hits different ⚡🏁",
+                hashtags = listOf("#phonk", "#drift", "#tokyodrift", "#kordhell", "#jdm", "#c1loop"),
+                musicTrack = "Murder In My Mind - KORDHELL",
+                category = VideoCategory.PHONK,
+                isBlink = true,
+                durationSeconds = 15,
+                likesCount = 8420,
+                commentsCount = 620,
+                sharesCount = 2100,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Neon Edge",
+                thumbnailRes = R.drawable.feed_cyber_snap_1792586101459,
+                videoGradientColors = listOf(0xFF0F172A, 0xFF4338CA, 0xFF06B6D4),
+                comments = listOf(
+                    VideoComment("vc_p1", "Zane Flux", "zane_flux", "#06B6D4", "That transition on the hairpin turn was illegal 🔥💨", "10m ago", 82, true),
+                    VideoComment("vc_p2", "Maya Lin", "maya_lin", "#EC4899", "KORDHELL never misses!! Turn this up 🔊", "4m ago", 45, false)
+                ),
+                createdAtFormatted = "18m ago"
+            ),
+            BlinkVideo(
+                id = "vid_phonk_2",
+                authorId = userZane.id,
+                authorName = userZane.displayName,
+                authorUsername = userZane.username,
+                authorAvatarColor = userZane.avatarColorHex,
+                title = "Night Supercar Cruise in the Rain 🌌",
+                caption = "Atmospheric drift phonk through city reflections. Pure cinematic night drive vibes 🌧️✨",
+                hashtags = listOf("#dvrst", "#closeeyes", "#driftphonk", "#nightdrive", "#supercar"),
+                musicTrack = "Close Eyes - DVRST",
+                category = VideoCategory.PHONK,
+                isBlink = false,
+                durationSeconds = 18,
+                likesCount = 7120,
+                commentsCount = 480,
+                sharesCount = 1650,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Cyber Glitch",
+                videoGradientColors = listOf(0xFF020617, 0xFF1E1B4B, 0xFF818CF8),
+                comments = listOf(
+                    VideoComment("vc_p3", "Liam Vance", "liam_beats", "#F59E0B", "DVRST's synth line is unmatched for late night drives 🌃", "30m ago", 37, true)
+                ),
+                createdAtFormatted = "45m ago"
+            ),
+            BlinkVideo(
+                id = "vid_phonk_3",
+                authorId = userLucas.id,
+                authorName = userLucas.displayName,
+                authorUsername = userLucas.username,
+                authorAvatarColor = userLucas.avatarColorHex,
+                title = "Heavy Deadlift PR: 500 lbs Lockout 🦾🔥",
+                caption = "226kg / 500lbs moving like butter! Zero hesitation, pure gym phonk adrenaline ⚡😤",
+                hashtags = listOf("#gymphonk", "#deadlift", "#pr", "#interworld", "#fitness", "#gains"),
+                musicTrack = "METAMORPHOSIS - INTERWORLD",
+                category = VideoCategory.PHONK,
+                isBlink = true,
+                durationSeconds = 14,
+                likesCount = 9340,
+                commentsCount = 810,
+                sharesCount = 2450,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Thermal FLIR",
+                videoGradientColors = listOf(0xFF18181B, 0xFF7F1D1D, 0xFFEF4444),
+                comments = listOf(
+                    VideoComment("vc_p4", "Kai Storm", "kai_storm", "#06B6D4", "LIGHT WEIGHT BABY!! INTERWORLD in the headphones = +50 lbs 💪", "15m ago", 112, true)
+                ),
+                createdAtFormatted = "1h ago"
+            ),
+            BlinkVideo(
+                id = "vid_phonk_4",
+                authorId = userSophia.id,
+                authorName = userSophia.displayName,
+                authorUsername = userSophia.username,
+                authorAvatarColor = userSophia.avatarColorHex,
+                title = "Brazilian Funk Phonk Dance Speed 🇧🇷⚡",
+                caption = "Insane footwork speed challenge with Brazilian drift rhythm! Can you keep up with this tempo? 💃🔥",
+                hashtags = listOf("#brazilianphonk", "#montagem", "#dancechallenge", "#funk", "#viral"),
+                musicTrack = "Montagem Coral - Dj Holanda & Mc Gw",
+                category = VideoCategory.PHONK,
+                isBlink = true,
+                durationSeconds = 16,
+                likesCount = 11200,
+                commentsCount = 940,
+                sharesCount = 3400,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Chromatic RGB",
+                videoGradientColors = listOf(0xFF064E3B, 0xFF10B981, 0xFFFACC15),
+                comments = listOf(
+                    VideoComment("vc_p5", "Elena Vance", "elena_v", "#10B981", "The foot speed is actually humanly impossible 😭🔥", "25m ago", 64, true)
+                ),
+                createdAtFormatted = "2h ago"
+            ),
+            BlinkVideo(
+                id = "vid_phonk_5",
+                authorId = userLiam.id,
+                authorName = userLiam.displayName,
+                authorUsername = userLiam.username,
+                authorAvatarColor = userLiam.avatarColorHex,
+                title = "Shibuya Underpass Skate Line 🛹📼",
+                caption = "Kickflip down the 6-stair into a backside powerslide. 90s cassette grit and pure flow 📼🛹",
+                hashtags = listOf("#skate", "#memphisphonk", "#pharmacist", "#street", "#vhs"),
+                musicTrack = "North Memphis - Pharmacist",
+                category = VideoCategory.PHONK,
+                isBlink = false,
+                durationSeconds = 15,
+                likesCount = 6310,
+                commentsCount = 390,
+                sharesCount = 1120,
+                isLiked = false,
+                isSaved = true,
+                filterName = "VHS 90s CRT",
+                videoGradientColors = listOf(0xFF1C1917, 0xFF78350F, 0xFFF59E0B),
+                createdAtFormatted = "3h ago"
+            ),
+            BlinkVideo(
+                id = "vid_phonk_6",
+                authorId = userJin.id,
+                authorName = userJin.displayName,
+                authorUsername = userJin.username,
+                authorAvatarColor = userJin.avatarColorHex,
+                title = "The Ultimate Chad Workout Montage 🗿👑",
+                caption = "Average Blinkchat enjoyer hitting the gym at 5 AM! Unstoppable discipline & heavy bass 🗿💪",
+                hashtags = listOf("#gigachad", "#gym", "#motivation", "#phonk", "#chad", "#discipline"),
+                musicTrack = "GigaChad Theme (Phonk Remix) - g3ox_em",
+                category = VideoCategory.PHONK,
+                isBlink = true,
+                durationSeconds = 15,
+                likesCount = 12500,
+                commentsCount = 1150,
+                sharesCount = 4200,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Pop Halftone",
+                videoGradientColors = listOf(0xFF18181B, 0xFF374151, 0xFF9CA3AF),
+                comments = listOf(
+                    VideoComment("vc_p6", "Lucas Gray", "lucas_g", "#F59E0B", "Can you hear the silence? Can you see the dark? 🗿👑", "40m ago", 204, true)
+                ),
+                createdAtFormatted = "3h ago"
+            ),
+            BlinkVideo(
+                id = "vid_phonk_7",
                 authorId = userMaya.id,
                 authorName = userMaya.displayName,
                 authorUsername = userMaya.username,
                 authorAvatarColor = userMaya.avatarColorHex,
-                title = "Dar es Salaam Sunset Groove 🌴",
-                caption = "Bongo Flava energy live from the Swahili coast! Pure vibes and infectious acoustic rhythm 💃🔥",
-                hashtags = listOf("#bongo", "#bongoflava", "#daressalaam", "#afrobeats", "#swahilivibe"),
-                musicTrack = "🌴 Bongo Flava Vibe - Dar es Salaam All-Stars",
-                category = VideoCategory.BONGO,
+                title = "Cyber Drift Horizon Sunset 🌅⚡",
+                caption = "Hypnotic dark wave phonk blasting as the sun dips below mountain peaks 🏔️🚗",
+                hashtags = listOf("#hensonn", "#sahara", "#drift", "#darkwave", "#sunsetdrive"),
+                musicTrack = "Sahara - Hensonn",
+                category = VideoCategory.PHONK,
+                isBlink = false,
+                durationSeconds = 20,
+                likesCount = 7890,
+                commentsCount = 510,
+                sharesCount = 1820,
+                isLiked = true,
+                isSaved = false,
+                filterName = "Teal & Orange",
+                videoGradientColors = listOf(0xFF31102A, 0xFF9D174D, 0xFFF97316),
+                createdAtFormatted = "4h ago"
+            ),
+
+            // 🎤 Pop Hits & World Artists
+            BlinkVideo(
+                id = "vid_pop_1",
+                authorId = userMaya.id,
+                authorName = userMaya.displayName,
+                authorUsername = userMaya.username,
+                authorAvatarColor = userMaya.avatarColorHex,
+                title = "Cruel Summer Singalong 💖",
+                caption = "Nothing beats singing Taylor Swift with the windows down! Cruel summer vibes 🎤✨",
+                hashtags = listOf("#taylorswift", "#cruelsummer", "#popmusic", "#singalong", "#erastour"),
+                musicTrack = "Cruel Summer - Taylor Swift",
+                category = VideoCategory.MUSIC,
                 isBlink = false,
                 durationSeconds = 22,
                 likesCount = 1420,
@@ -569,24 +870,24 @@ class BlinkRepository(private val context: Context? = null) {
                 isSaved = true,
                 filterName = "Golden Sunset",
                 thumbnailRes = R.drawable.feed_sunset_snap_1792586114190,
-                videoGradientColors = listOf(0xFF451A03, 0xFFB45309, 0xFFF59E0B),
+                videoGradientColors = listOf(0xFF831843, 0xFFBE185D, 0xFFF472B6),
                 comments = listOf(
-                    VideoComment("vc_b1", "Kai Storm", "kai_storm", "#06B6D4", "Bongo Flava on Blinkchat hits so smooth! 🌴🔥", "12m ago", 24, true),
-                    VideoComment("vc_b2", "Elena Vance", "elena_v", "#10B981", "The guitar riffs are pure bliss ✨", "5m ago", 9, false)
+                    VideoComment("vc_b1", "Kai Storm", "kai_storm", "#06B6D4", "Taylor's bridge is unmatched!! 💖🔥", "12m ago", 24, true),
+                    VideoComment("vc_b2", "Elena Vance", "elena_v", "#10B981", "The vocal melody is pure bliss ✨", "5m ago", 9, false)
                 ),
                 createdAtFormatted = "1h ago"
             ),
             BlinkVideo(
-                id = "vid_bongo_2",
+                id = "vid_pop_2",
                 authorId = userKai.id,
                 authorName = userKai.displayName,
                 authorUsername = userKai.username,
                 authorAvatarColor = userKai.avatarColorHex,
-                title = "Afrobeat Dance Challenge 🔥",
-                caption = "Can you hit this footwork beat drop?! Tag your dance crew and duet this rhythm 🕺✨",
-                hashtags = listOf("#afrodance", "#burnaboy", "#afrobeats", "#footwork", "#lagos"),
-                musicTrack = "🔥 Afrobeat Fire - Burna Rhythm Express",
-                category = VideoCategory.BONGO,
+                title = "Blinding Lights City Night ✨",
+                caption = "Late night drive with The Weeknd on repeat! Neon vibes all night 🕶️✨",
+                hashtags = listOf("#theweeknd", "#blindinglights", "#synthpop", "#nightdrive", "#neon"),
+                musicTrack = "Blinding Lights - The Weeknd",
+                category = VideoCategory.MUSIC,
                 isBlink = true,
                 durationSeconds = 18,
                 likesCount = 2150,
@@ -595,23 +896,23 @@ class BlinkRepository(private val context: Context? = null) {
                 isLiked = false,
                 isSaved = true,
                 filterName = "Neon Heat",
-                videoGradientColors = listOf(0xFF7C2D12, 0xFFEA580C, 0xFFFBBF24),
+                videoGradientColors = listOf(0xFF1E1B4B, 0xFF4338CA, 0xFF818CF8),
                 comments = listOf(
-                    VideoComment("vc_b3", "Maya Lin", "maya_lin", "#EC4899", "Your footwork speed is insane bro!! 🔥", "30m ago", 45, true)
+                    VideoComment("vc_b3", "Maya Lin", "maya_lin", "#EC4899", "Best song of the decade hands down 🔥", "30m ago", 45, true)
                 ),
                 createdAtFormatted = "2h ago"
             ),
             BlinkVideo(
-                id = "vid_bongo_3",
+                id = "vid_pop_3",
                 authorId = userElena.id,
                 authorName = userElena.displayName,
                 authorUsername = userElena.username,
                 authorAvatarColor = userElena.avatarColorHex,
-                title = "Amapiano Sunrise Log Drum 🥁",
-                caption = "The deep rolling bass log drum frequency hits different with headphones on! 🎧✨",
-                hashtags = listOf("#amapiano", "#logdrum", "#sowetobeats", "#deephouse", "#bass"),
-                musicTrack = "🥁 Amapiano Sunrise - Deep Log Groove",
-                category = VideoCategory.BONGO,
+                title = "As It Was Golden Hour 🌟",
+                caption = "Harry Styles acoustic harmonies hitting right in the golden hour feelings 🌅",
+                hashtags = listOf("#harrystyles", "#asitwas", "#pop", "#indiepop", "#vibes"),
+                musicTrack = "As It Was - Harry Styles",
+                category = VideoCategory.MUSIC,
                 isBlink = false,
                 durationSeconds = 25,
                 likesCount = 980,
@@ -621,6 +922,204 @@ class BlinkRepository(private val context: Context? = null) {
                 isSaved = false,
                 videoGradientColors = listOf(0xFF1E1B4B, 0xFF4338CA, 0xFFF43F5E),
                 createdAtFormatted = "4h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_4",
+                authorId = userChloe.id,
+                authorName = userChloe.displayName,
+                authorUsername = userChloe.username,
+                authorAvatarColor = userChloe.avatarColorHex,
+                title = "Flowers Rooftop Golden Dance 🌸",
+                caption = "I can buy myself flowers, write my name in the sand! Self-love rooftop party with the girls 🌇💐",
+                hashtags = listOf("#mileycyrus", "#flowers", "#selflove", "#dance", "#rooftop"),
+                musicTrack = "Flowers - Miley Cyrus",
+                category = VideoCategory.MUSIC,
+                isBlink = false,
+                durationSeconds = 22,
+                likesCount = 6890,
+                commentsCount = 430,
+                sharesCount = 1540,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Golden Hour",
+                videoGradientColors = listOf(0xFF831843, 0xFFDB2777, 0xFFFDE047),
+                createdAtFormatted = "3h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_5",
+                authorId = userAisha.id,
+                authorName = userAisha.displayName,
+                authorUsername = userAisha.username,
+                authorAvatarColor = userAisha.avatarColorHex,
+                title = "Roller Skates Nu-Disco Bounce 🪩",
+                caption = "Glide, spin, and vibe! Sunset roller skate choreo by the beach promenade 🌴🛼",
+                hashtags = listOf("#dualipa", "#levitating", "#rollerskates", "#disco", "#beachvibes"),
+                musicTrack = "Levitating - Dua Lipa",
+                category = VideoCategory.MUSIC,
+                isBlink = true,
+                durationSeconds = 19,
+                likesCount = 8430,
+                commentsCount = 560,
+                sharesCount = 2190,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Prism Sparkle",
+                videoGradientColors = listOf(0xFF4C1D95, 0xFF7C3AED, 0xFFEC4899),
+                createdAtFormatted = "4h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_6",
+                authorId = userLucas.id,
+                authorName = userLucas.displayName,
+                authorUsername = userLucas.username,
+                authorAvatarColor = userLucas.avatarColorHex,
+                title = "Acoustic Loop Station Cover 🎸",
+                caption = "Building Ed Sheeran's iconic marimba riff using just my acoustic guitar body and a loop pedal! 🎶🎸",
+                hashtags = listOf("#edsheeran", "#shapeofyou", "#loopstation", "#guitarcover", "#fingerstyle"),
+                musicTrack = "Shape of You - Ed Sheeran",
+                category = VideoCategory.MUSIC,
+                isBlink = false,
+                durationSeconds = 26,
+                likesCount = 5940,
+                commentsCount = 390,
+                sharesCount = 1240,
+                isLiked = false,
+                isSaved = true,
+                filterName = "Vintage Kodachrome",
+                videoGradientColors = listOf(0xFF78350F, 0xFFD97706, 0xFFFCD34D),
+                createdAtFormatted = "5h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_7",
+                authorId = userElena.id,
+                authorName = userElena.displayName,
+                authorUsername = userElena.username,
+                authorAvatarColor = userElena.avatarColorHex,
+                title = "That Vampire Bridge Hits So Hard 🩸",
+                caption = "Full volume screams in the car at midnight!! Olivia Rodrigo wrote this from the soul 🚗😭",
+                hashtags = listOf("#oliviarodrigo", "#vampire", "#singalong", "#carride", "#poprock"),
+                musicTrack = "Vampire - Olivia Rodrigo",
+                category = VideoCategory.MUSIC,
+                isBlink = true,
+                durationSeconds = 21,
+                likesCount = 7720,
+                commentsCount = 620,
+                sharesCount = 1980,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Noir 35mm",
+                videoGradientColors = listOf(0xFF18181B, 0xFF450A0A, 0xFFDC2626),
+                createdAtFormatted = "6h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_8",
+                authorId = userMe.id,
+                authorName = userMe.displayName,
+                authorUsername = userMe.username,
+                authorAvatarColor = userMe.avatarColorHex,
+                title = "Synthwave Night Lights 🕶️",
+                caption = "Raindrops on the windshield dancing to The Weeknd's unforgettable 80s synth riff 🌧️🎹",
+                hashtags = listOf("#theweeknd", "#saveyourtears", "#nightdrive", "#synthwave", "#chill"),
+                musicTrack = "Save Your Tears - The Weeknd",
+                category = VideoCategory.MUSIC,
+                isBlink = false,
+                durationSeconds = 23,
+                likesCount = 8650,
+                commentsCount = 640,
+                sharesCount = 2310,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Teal & Orange",
+                videoGradientColors = listOf(0xFF0F172A, 0xFF312E81, 0xFF38BDF8),
+                createdAtFormatted = "6h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_9",
+                authorId = userKai.id,
+                authorName = userKai.displayName,
+                authorUsername = userKai.username,
+                authorAvatarColor = userKai.avatarColorHex,
+                title = "Festival Mainstage Thunder Drop ⚡🔥",
+                caption = "When the drums hit and 50,000 people jumped at the exact same second!! UNREAL energy 🏟️🎆",
+                hashtags = listOf("#imaginedragons", "#radioactive", "#festival", "#rock", "#crowd"),
+                musicTrack = "Radioactive - Imagine Dragons",
+                category = VideoCategory.MUSIC,
+                isBlink = true,
+                durationSeconds = 18,
+                likesCount = 10450,
+                commentsCount = 890,
+                sharesCount = 3670,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Neon Edge",
+                videoGradientColors = listOf(0xFF020617, 0xFF1E3A8A, 0xFFF59E0B),
+                createdAtFormatted = "7h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_10",
+                authorId = userLiam.id,
+                authorName = userLiam.displayName,
+                authorUsername = userLiam.username,
+                authorAvatarColor = userLiam.avatarColorHex,
+                title = "Golden Hour Skatepark Sunset 🌻",
+                caption = "Catching the last rays of sunshine doing tre-flips with friends! Peak summer memories 🛹☀️",
+                hashtags = listOf("#postmalone", "#sunflower", "#skatepark", "#goldenhour", "#summer"),
+                musicTrack = "Sunflower - Post Malone & Swae Lee",
+                category = VideoCategory.MUSIC,
+                isBlink = false,
+                durationSeconds = 20,
+                likesCount = 8780,
+                commentsCount = 630,
+                sharesCount = 2410,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Golden Sunset",
+                videoGradientColors = listOf(0xFF78350F, 0xFFD97706, 0xFFF59E0B),
+                createdAtFormatted = "8h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_11",
+                authorId = userSophia.id,
+                authorName = userSophia.displayName,
+                authorUsername = userSophia.username,
+                authorAvatarColor = userSophia.avatarColorHex,
+                title = "Vintage Motown Silk Sonic Groove 🚪🎙️",
+                caption = "Velvety vocal harmonies and 70s soul warmth on a vintage microphone 🎶💖",
+                hashtags = listOf("#brunomars", "#silksonic", "#motown", "#soul", "#vocalcover"),
+                musicTrack = "Leave The Door Open - Bruno Mars",
+                category = VideoCategory.MUSIC,
+                isBlink = false,
+                durationSeconds = 24,
+                likesCount = 6920,
+                commentsCount = 490,
+                sharesCount = 1680,
+                isLiked = true,
+                isSaved = false,
+                filterName = "Vintage Kodachrome",
+                videoGradientColors = listOf(0xFF451A03, 0xFF92400E, 0xFFFBBF24),
+                createdAtFormatted = "8h ago"
+            ),
+            BlinkVideo(
+                id = "vid_pop_12",
+                authorId = userAisha.id,
+                authorName = userAisha.displayName,
+                authorUsername = userAisha.username,
+                authorAvatarColor = userAisha.avatarColorHex,
+                title = "Midnight Shadow Neo-Soul Jam 🗡️",
+                caption = "Smooth bassline and guitar chords under moody crimson streetlamps 🌹🌙",
+                hashtags = listOf("#sza", "#killbill", "#neosoul", "#vibes", "#nightvibes"),
+                musicTrack = "Kill Bill - SZA",
+                category = VideoCategory.MUSIC,
+                isBlink = true,
+                durationSeconds = 21,
+                likesCount = 8120,
+                commentsCount = 590,
+                sharesCount = 2240,
+                isLiked = true,
+                isSaved = true,
+                filterName = "Teal & Orange",
+                videoGradientColors = listOf(0xFF1E1B4B, 0xFF4C1D95, 0xFFF43F5E),
+                createdAtFormatted = "9h ago"
             ),
 
             // 🎭 Dramatic Videos
@@ -1516,6 +2015,108 @@ class BlinkRepository(private val context: Context? = null) {
         }
     }
 
+    fun togglePostReaction(postId: String, emoji: String) {
+        _posts.update { list ->
+            list.map { post ->
+                if (post.id == postId) {
+                    val currentReactions = post.reactions.toMutableMap()
+                    val prevReaction = post.userReaction
+                    val newReaction: String?
+
+                    if (prevReaction == emoji) {
+                        // User un-reacts with same emoji
+                        val count = (currentReactions[emoji] ?: 1) - 1
+                        if (count <= 0) currentReactions.remove(emoji) else currentReactions[emoji] = count
+                        newReaction = null
+                    } else {
+                        // If they had a previous reaction, remove it
+                        if (prevReaction != null) {
+                            val oldCount = (currentReactions[prevReaction] ?: 1) - 1
+                            if (oldCount <= 0) currentReactions.remove(prevReaction) else currentReactions[prevReaction] = oldCount
+                        }
+                        // Add new reaction
+                        currentReactions[emoji] = (currentReactions[emoji] ?: 0) + 1
+                        newReaction = emoji
+                    }
+
+                    // Also sync isLiked if emoji is heart
+                    val newLiked = if (newReaction == "❤️") true else if (prevReaction == "❤️" && newReaction == null) false else post.isLiked
+                    val newLikesCount = if (newReaction == "❤️" && !post.isLiked) post.likesCount + 1 
+                                        else if (prevReaction == "❤️" && newReaction != "❤️" && post.isLiked) (post.likesCount - 1).coerceAtLeast(0) 
+                                        else post.likesCount
+
+                    post.copy(
+                        reactions = currentReactions,
+                        userReaction = newReaction,
+                        isLiked = newLiked,
+                        likesCount = newLikesCount
+                    )
+                } else post
+            }
+        }
+    }
+
+    fun sharePost(postId: String) {
+        _posts.update { list ->
+            list.map { post ->
+                if (post.id == postId) post.copy(sharesCount = post.sharesCount + 1) else post
+            }
+        }
+    }
+
+    fun sharePostToConversation(postId: String, conversationId: String) {
+        val post = _posts.value.find { it.id == postId } ?: return
+        sharePost(postId)
+        sendMessage(
+            conversationId = conversationId,
+            text = "Shared a Blink by @${post.authorUsername}: \"${post.caption.take(60)}...\" 🔗✨"
+        )
+    }
+
+    // --- Notifications Management ---
+    fun markNotificationAsRead(notificationId: String) {
+        _notifications.update { list ->
+            list.map { if (it.id == notificationId) it.copy(isRead = true) else it }
+        }
+    }
+
+    fun markAllNotificationsAsRead() {
+        _notifications.update { list ->
+            list.map { it.copy(isRead = true) }
+        }
+    }
+
+    fun toggleFollowBackNotification(notificationId: String) {
+        _notifications.update { list ->
+            list.map { notif ->
+                if (notif.id == notificationId) {
+                    val newFollowedBack = !notif.isFollowedBack
+                    // Update user following count
+                    _currentUser.update { user ->
+                        user?.let {
+                            val change = if (newFollowedBack) 1 else -1
+                            it.copy(followingCount = (it.followingCount + change).coerceAtLeast(0))
+                        }
+                    }
+                    notif.copy(isFollowedBack = newFollowedBack)
+                } else notif
+            }
+        }
+    }
+
+    fun deleteNotification(notificationId: String) {
+        _notifications.update { list ->
+            list.filterNot { it.id == notificationId }
+        }
+    }
+
+    fun followCreator(creatorUsername: String) {
+        _currentUser.update { user ->
+            user?.copy(followingCount = user.followingCount + 1)
+        }
+    }
+
+
     fun addComment(postId: String, text: String) {
         if (text.isBlank()) return
         val user = _currentUser.value ?: return
@@ -2081,9 +2682,463 @@ class BlinkRepository(private val context: Context? = null) {
         _currentUser.update { it?.copy(isGhostMode = newSettings.ghostMode) }
     }
 
+    // --- Anonymous Real-Time Random Blink Chat ---
+    val anonymousUserId: String = "anon_" + UUID.randomUUID().toString().take(8)
+    val anonymousUserName: String = getRandomAnonymousName()
+    val anonymousAvatarColor: String = getRandomAvatarColor()
+
+    private val _randomMatchState = MutableStateFlow(MatchState.IDLE)
+    val randomMatchState: StateFlow<MatchState> = _randomMatchState.asStateFlow()
+
+    private val _activeRandomChat = MutableStateFlow<ActiveRandomChat?>(null)
+    val activeRandomChat: StateFlow<ActiveRandomChat?> = _activeRandomChat.asStateFlow()
+
+    private val _randomChatMessages = MutableStateFlow<List<RandomChatMessage>>(emptyList())
+    val randomChatMessages: StateFlow<List<RandomChatMessage>> = _randomChatMessages.asStateFlow()
+
+    private var myQueueEntryId: String? = null
+    private var queueListener: ListenerRegistration? = null
+    private var messagesListener: ListenerRegistration? = null
+    private var chatDocListener: ListenerRegistration? = null
+    private var matchingFallbackJob: Job? = null
+    private var simulatedChatJob: Job? = null
+
+    fun startRandomMatch() {
+        cleanUpRandomMatch()
+        _randomMatchState.value = MatchState.SEARCHING
+        _randomChatMessages.value = emptyList()
+
+        val myEntryId = "q_" + UUID.randomUUID().toString().take(8)
+        myQueueEntryId = myEntryId
+
+        val db = firestoreDb
+        if (db != null) {
+            try {
+                // Look for an existing waiting peer in match_queue
+                db.collection("match_queue")
+                    .whereEqualTo("status", "waiting")
+                    .limit(5)
+                    .get()
+                    .addOnSuccessListener { snapshot ->
+                        val peerDoc = snapshot.documents.firstOrNull { doc ->
+                            doc.getString("anonymousId") != anonymousUserId &&
+                            doc.getString("status") == "waiting"
+                        }
+
+                        if (peerDoc != null) {
+                            // Match with waiting peer!
+                            val peerId = peerDoc.getString("anonymousId") ?: "peer_anon"
+                            val peerName = peerDoc.getString("anonymousName") ?: "Anonymous Blink"
+                            val peerAvatar = peerDoc.getString("anonymousAvatarColor") ?: "#06B6D4"
+                            val chatId = "chat_" + UUID.randomUUID().toString().take(10)
+
+                            val newChat = ActiveRandomChat(
+                                id = chatId,
+                                participantA = peerId,
+                                participantB = anonymousUserId,
+                                participantAName = peerName,
+                                participantBName = anonymousUserName,
+                                participantAAvatar = peerAvatar,
+                                participantBAvatar = anonymousAvatarColor,
+                                status = "active",
+                                createdAt = System.currentTimeMillis(),
+                                expiresAt = System.currentTimeMillis() + 120_000L
+                            )
+
+                            // 1. Create active_chat doc
+                            db.collection("active_chats").document(chatId).set(
+                                mapOf(
+                                    "id" to chatId,
+                                    "participantA" to peerId,
+                                    "participantB" to anonymousUserId,
+                                    "participantAName" to peerName,
+                                    "participantBName" to anonymousUserName,
+                                    "participantAAvatar" to peerAvatar,
+                                    "participantBAvatar" to anonymousAvatarColor,
+                                    "status" to "active",
+                                    "createdAt" to newChat.createdAt,
+                                    "expiresAt" to newChat.expiresAt
+                                )
+                            )
+
+                            // 2. Notify peer
+                            peerDoc.reference.update(
+                                mapOf(
+                                    "status" to "matched",
+                                    "matchedChatId" to chatId,
+                                    "peerAnonymousName" to anonymousUserName,
+                                    "peerAvatarColor" to anonymousAvatarColor
+                                )
+                            )
+
+                            // 3. Join chat directly
+                            joinActiveRandomChat(newChat)
+                        } else {
+                            // Put myself in queue
+                            val myData = mapOf(
+                                "id" to myEntryId,
+                                "anonymousId" to anonymousUserId,
+                                "anonymousName" to anonymousUserName,
+                                "anonymousAvatarColor" to anonymousAvatarColor,
+                                "status" to "waiting",
+                                "joinedAt" to System.currentTimeMillis()
+                            )
+                            db.collection("match_queue").document(myEntryId).set(myData)
+
+                            // Listen for match confirmation on my queue entry
+                            queueListener = db.collection("match_queue").document(myEntryId)
+                                .addSnapshotListener { docSnap, error ->
+                                    if (error != null || docSnap == null || !docSnap.exists()) return@addSnapshotListener
+                                    val status = docSnap.getString("status")
+                                    val matchedChatId = docSnap.getString("matchedChatId")
+                                    if (status == "matched" && !matchedChatId.isNullOrBlank()) {
+                                        val peerName = docSnap.getString("peerAnonymousName") ?: "Anonymous Partner"
+                                        val peerAvatar = docSnap.getString("peerAvatarColor") ?: "#06B6D4"
+                                        val matchedChat = ActiveRandomChat(
+                                            id = matchedChatId,
+                                            participantA = anonymousUserId,
+                                            participantB = "peer",
+                                            participantAName = anonymousUserName,
+                                            participantBName = peerName,
+                                            participantAAvatar = anonymousAvatarColor,
+                                            participantBAvatar = peerAvatar,
+                                            status = "active",
+                                            createdAt = System.currentTimeMillis(),
+                                            expiresAt = System.currentTimeMillis() + 120_000L
+                                        )
+                                        joinActiveRandomChat(matchedChat)
+                                    }
+                                }
+
+                            // Responsive fallback for single-user live emulator preview
+                            startFallbackPairingTimer()
+                        }
+                    }
+                    .addOnFailureListener {
+                        startFallbackPairingTimer()
+                    }
+            } catch (e: Exception) {
+                Log.w("BlinkRepo", "startRandomMatch error: ${e.message}")
+                startFallbackPairingTimer()
+            }
+        } else {
+            startFallbackPairingTimer()
+        }
+    }
+
+    private fun startFallbackPairingTimer() {
+        matchingFallbackJob?.cancel()
+        matchingFallbackJob = scope.launch {
+            delay(2800) // Realistic 2.8s radar search
+            if (_randomMatchState.value == MatchState.SEARCHING) {
+                val partnerName = getRandomAnonymousName(exclude = anonymousUserName)
+                val partnerAvatar = getRandomAvatarColor()
+                val chatId = "chat_sim_" + UUID.randomUUID().toString().take(8)
+
+                val simulatedChat = ActiveRandomChat(
+                    id = chatId,
+                    participantA = anonymousUserId,
+                    participantB = "sim_peer_" + UUID.randomUUID().toString().take(4),
+                    participantAName = anonymousUserName,
+                    participantBName = partnerName,
+                    participantAAvatar = anonymousAvatarColor,
+                    participantBAvatar = partnerAvatar,
+                    status = "active",
+                    createdAt = System.currentTimeMillis(),
+                    expiresAt = System.currentTimeMillis() + 120_000L
+                )
+
+                // Also persist in Firestore active_chats if online
+                try {
+                    firestoreDb?.collection("active_chats")?.document(chatId)?.set(
+                        mapOf(
+                            "id" to chatId,
+                            "participantA" to simulatedChat.participantA,
+                            "participantB" to simulatedChat.participantB,
+                            "participantAName" to simulatedChat.participantAName,
+                            "participantBName" to simulatedChat.participantBName,
+                            "status" to "active",
+                            "createdAt" to simulatedChat.createdAt,
+                            "expiresAt" to simulatedChat.expiresAt
+                        )
+                    )
+                } catch (_: Exception) {}
+
+                joinActiveRandomChat(simulatedChat)
+            }
+        }
+    }
+
+    private fun joinActiveRandomChat(chat: ActiveRandomChat) {
+        matchingFallbackJob?.cancel()
+        queueListener?.remove()
+        queueListener = null
+
+        // Remove from match queue
+        myQueueEntryId?.let { entryId ->
+            try {
+                firestoreDb?.collection("match_queue")?.document(entryId)?.delete()
+            } catch (_: Exception) {}
+        }
+
+        _activeRandomChat.value = chat
+        _randomMatchState.value = MatchState.MATCHED
+
+        // Welcome system message
+        val welcomeMsg = RandomChatMessage(
+            id = "sys_welcome",
+            chatId = chat.id,
+            senderId = "system",
+            senderAnonymousName = "Blink System",
+            text = "⚡ Anonymous match established! You have 2:00 to chat. Say hello or tap Next to skip.",
+            createdAt = System.currentTimeMillis(),
+            isFromMe = false
+        )
+        _randomChatMessages.value = listOf(welcomeMsg)
+
+        // Real-time Firestore snapshot listener on /active_chats/{chatId}/messages
+        val db = firestoreDb
+        if (db != null) {
+            try {
+                messagesListener = db.collection("active_chats")
+                    .document(chat.id)
+                    .collection("messages")
+                    .orderBy("createdAt")
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null || snapshot == null) return@addSnapshotListener
+                        val remoteMessages = snapshot.documents.mapNotNull { doc ->
+                            val id = doc.getString("id") ?: doc.id
+                            val text = doc.getString("text") ?: return@mapNotNull null
+                            val senderId = doc.getString("senderId") ?: ""
+                            val senderName = doc.getString("senderAnonymousName") ?: "Anonymous"
+                            val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            RandomChatMessage(
+                                id = id,
+                                chatId = chat.id,
+                                senderId = senderId,
+                                senderAnonymousName = senderName,
+                                text = text,
+                                createdAt = createdAt,
+                                isFromMe = (senderId == anonymousUserId)
+                            )
+                        }
+                        if (remoteMessages.isNotEmpty()) {
+                            _randomChatMessages.update { current ->
+                                val existingIds = current.map { it.id }.toSet()
+                                val newItems = remoteMessages.filterNot { it.id in existingIds }
+                                current + newItems
+                            }
+                        }
+                    }
+
+                // Listen to chat doc for skip/ended
+                chatDocListener = db.collection("active_chats").document(chat.id)
+                    .addSnapshotListener { doc, error ->
+                        if (error != null || doc == null || !doc.exists()) return@addSnapshotListener
+                        val status = doc.getString("status")
+                        if (status == "skipped" && _activeRandomChat.value?.status == "active") {
+                            _activeRandomChat.update { it?.copy(status = "skipped") }
+                        }
+                    }
+            } catch (e: Exception) {
+                Log.w("BlinkRepo", "joinActiveRandomChat listener error: ${e.message}")
+            }
+        }
+
+        // If simulated partner, initiate greetings
+        if (chat.participantB.startsWith("sim_peer_")) {
+            scheduleSimulatedPartnerGreeting(chat)
+        }
+    }
+
+    private fun scheduleSimulatedPartnerGreeting(chat: ActiveRandomChat) {
+        simulatedChatJob?.cancel()
+        simulatedChatJob = scope.launch {
+            delay(1200)
+            if (_activeRandomChat.value?.id == chat.id) {
+                val greetings = listOf(
+                    "Hey there! Where are you blinking from? ⚡",
+                    "Yo! How's your day going? ✨",
+                    "Hey! Love the anonymous Blink match feature 🔥",
+                    "Hello! What music or videos are you into today? 🎧"
+                )
+                val reply = greetings.random()
+                val peerMsg = RandomChatMessage(
+                    id = "msg_" + UUID.randomUUID().toString().take(8),
+                    chatId = chat.id,
+                    senderId = chat.participantB,
+                    senderAnonymousName = chat.participantBName,
+                    text = reply,
+                    createdAt = System.currentTimeMillis(),
+                    isFromMe = false
+                )
+                _randomChatMessages.update { it + peerMsg }
+            }
+        }
+    }
+
+    fun sendRandomChatMessage(text: String) {
+        if (text.isBlank()) return
+        val chat = _activeRandomChat.value ?: return
+
+        val newMsg = RandomChatMessage(
+            id = "msg_" + UUID.randomUUID().toString().take(8),
+            chatId = chat.id,
+            senderId = anonymousUserId,
+            senderAnonymousName = anonymousUserName,
+            text = text.trim(),
+            createdAt = System.currentTimeMillis(),
+            isFromMe = true
+        )
+
+        _randomChatMessages.update { it + newMsg }
+
+        // Write to Firestore /active_chats/{chatId}/messages
+        try {
+            firestoreDb?.collection("active_chats")
+                ?.document(chat.id)
+                ?.collection("messages")
+                ?.document(newMsg.id)
+                ?.set(
+                    mapOf(
+                        "id" to newMsg.id,
+                        "chatId" to chat.id,
+                        "senderId" to anonymousUserId,
+                        "senderAnonymousName" to anonymousUserName,
+                        "text" to newMsg.text,
+                        "createdAt" to newMsg.createdAt
+                    )
+                )
+        } catch (e: Exception) {
+            Log.w("BlinkRepo", "Firestore random message write: ${e.message}")
+        }
+
+        // If simulated partner, schedule conversational response
+        if (chat.participantB.startsWith("sim_peer_")) {
+            scope.launch {
+                delay(1500 + (text.length * 20L).coerceAtMost(2000L))
+                if (_activeRandomChat.value?.id == chat.id) {
+                    val responses = listOf(
+                        "Haha that's awesome! ⚡",
+                        "Nice! I'm listening to some phonk and editing blinks right now 🎧",
+                        "Only 2 minutes on this timer, goes fast! ⏳",
+                        "Same here! That's super cool 🔥",
+                        "Tokyo neon vibes forever ✨ Have you tried the camera shaders?",
+                        "Totally agree! Glad we got matched 🙌"
+                    )
+                    val partnerReply = RandomChatMessage(
+                        id = "msg_" + UUID.randomUUID().toString().take(8),
+                        chatId = chat.id,
+                        senderId = chat.participantB,
+                        senderAnonymousName = chat.participantBName,
+                        text = responses.random(),
+                        createdAt = System.currentTimeMillis(),
+                        isFromMe = false
+                    )
+                    _randomChatMessages.update { it + partnerReply }
+                }
+            }
+        }
+    }
+
+    fun skipRandomChat() {
+        val currentChat = _activeRandomChat.value
+        if (currentChat != null) {
+            try {
+                firestoreDb?.collection("active_chats")
+                    ?.document(currentChat.id)
+                    ?.update("status", "skipped")
+            } catch (_: Exception) {}
+        }
+        cleanUpRandomMatch()
+        // Immediately search for next random partner!
+        startRandomMatch()
+    }
+
+    fun cancelRandomMatch() {
+        val currentChat = _activeRandomChat.value
+        if (currentChat != null) {
+            try {
+                firestoreDb?.collection("active_chats")
+                    ?.document(currentChat.id)
+                    ?.update("status", "ended")
+            } catch (_: Exception) {}
+        }
+        cleanUpRandomMatch()
+        _randomMatchState.value = MatchState.IDLE
+        _activeRandomChat.value = null
+        _randomChatMessages.value = emptyList()
+    }
+
+    fun reportRandomChat(reason: String, details: String) {
+        val currentChat = _activeRandomChat.value
+        val peerName = if (currentChat?.participantA == anonymousUserId) currentChat.participantBName else (currentChat?.participantAName ?: "Anonymous")
+        
+        try {
+            val reportId = "rep_" + UUID.randomUUID().toString().take(8)
+            firestoreDb?.collection("reports")?.document(reportId)?.set(
+                mapOf(
+                    "id" to reportId,
+                    "targetType" to "random_chat",
+                    "chatId" to (currentChat?.id ?: ""),
+                    "reportedAnonymousUser" to peerName,
+                    "reporterAnonymousId" to anonymousUserId,
+                    "reason" to reason,
+                    "details" to details,
+                    "createdAt" to System.currentTimeMillis()
+                )
+            )
+            currentChat?.id?.let { cid ->
+                firestoreDb?.collection("active_chats")?.document(cid)?.update("status", "reported")
+            }
+        } catch (_: Exception) {}
+
+        cleanUpRandomMatch()
+        _randomMatchState.value = MatchState.IDLE
+        _activeRandomChat.value = null
+        _randomChatMessages.value = emptyList()
+    }
+
+    private fun cleanUpRandomMatch() {
+        matchingFallbackJob?.cancel()
+        matchingFallbackJob = null
+        simulatedChatJob?.cancel()
+        simulatedChatJob = null
+        queueListener?.remove()
+        queueListener = null
+        messagesListener?.remove()
+        messagesListener = null
+        chatDocListener?.remove()
+        chatDocListener = null
+
+        myQueueEntryId?.let { entryId ->
+            try {
+                firestoreDb?.collection("match_queue")?.document(entryId)?.delete()
+            } catch (_: Exception) {}
+        }
+        myQueueEntryId = null
+    }
+
+    private fun getRandomAnonymousName(exclude: String = ""): String {
+        val adjectives = listOf("Neon", "Cyber", "Echo", "Cosmo", "Velvet", "Solar", "Hyper", "Quantum", "Shadow", "Aura", "Stellar", "Pixel")
+        val nouns = listOf("Blink", "Nomad", "Surfer", "Phantom", "Pulse", "Flare", "Rider", "Voyager", "Viper", "Echo", "Drifter", "Spark")
+        val number = (10..99).random()
+        var name = "${adjectives.random()}${nouns.random()} #$number"
+        if (name == exclude) {
+            name = "${adjectives.random()}${nouns.random()} #${(100..999).random()}"
+        }
+        return name
+    }
+
+    private fun getRandomAvatarColor(): String {
+        val colors = listOf("#EC4899", "#06B6D4", "#8B5CF6", "#10B981", "#F59E0B", "#3B82F6", "#EF4444", "#14B8A6")
+        return colors.random()
+    }
+
     private fun formatTime(millis: Long): String {
         val sdf = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
         return sdf.format(java.util.Date(millis))
     }
 }
+
 

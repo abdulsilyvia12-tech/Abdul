@@ -4,6 +4,7 @@ import androidx.annotation.DrawableRes
 
 enum class VideoCategory {
     ALL,
+    PHONK, // Drift phonk, Brazilian phonk, bass-boosted gym edits
     DRAMATIC, // Heavy suspense, cinematic drama, intense soundtracks
     FUNNY, // Comedy sketches, laugh-out-loud pranks, funny faces
     MUSIC, // High-energy beat drops, dance, acoustic jams

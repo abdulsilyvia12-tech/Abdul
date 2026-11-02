@@ -52,6 +52,7 @@ fun AuthScreen(
     onCreateAccountSuccess: (username: String, displayName: String, email: String, bio: String) -> Unit,
     onOpenCrm: (() -> Unit)? = null,
     onContinueOffline: (() -> Unit)? = null,
+    onStartAnonymousBlink: () -> Unit = {},
     demoUsers: List<User>
 ) {
     val context = LocalContext.current
@@ -170,7 +171,76 @@ fun AuthScreen(
                 modifier = Modifier.padding(top = 4.dp)
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Instant Anonymous Random Chat Entry (No Profile Needed)
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = BlinkPrimary.copy(alpha = 0.15f),
+                border = androidx.compose.foundation.BorderStroke(1.2.dp, BlinkCyan.copy(alpha = 0.6f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onStartAnonymousBlink() }
+                    .testTag("auth_start_anonymous_blink_btn")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(listOf(BlinkPrimary, BlinkPink, BlinkCyan))
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Bolt,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Blink Match ⚡",
+                                fontWeight = FontWeight.Black,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = BlinkPink.copy(alpha = 0.2f)
+                            ) {
+                                Text(
+                                    text = "No Profile",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = BlinkPinkLight,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Real-time 2-min anonymous random chat",
+                            fontSize = 11.sp,
+                            color = BlinkCyanLight
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = BlinkCyanLight
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Portal Segmented Tabs
             TabRow(

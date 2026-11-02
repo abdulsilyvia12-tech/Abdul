@@ -8,10 +8,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.Conversation
+import com.example.data.model.MatchState
 import com.example.data.model.Story
 import com.example.data.model.User
 import com.example.data.repository.BlinkRepository
@@ -48,6 +50,12 @@ fun BlinkApp(repository: BlinkRepository) {
     val callState by repository.currentCall.collectAsStateWithLifecycle()
     val videos by repository.videos.collectAsStateWithLifecycle()
     val friendRequests by repository.friendRequests.collectAsStateWithLifecycle()
+    val notifications by repository.notifications.collectAsStateWithLifecycle()
+
+    // Real-Time Anonymous Random Matching & Chat State (Firestore Powered)
+    val randomMatchState by repository.randomMatchState.collectAsStateWithLifecycle()
+    val activeRandomChat by repository.activeRandomChat.collectAsStateWithLifecycle()
+    val randomChatMessages by repository.randomChatMessages.collectAsStateWithLifecycle()
 
     // CRM & Offline State
     val customerAccounts by repository.customerAccounts.collectAsStateWithLifecycle()
@@ -61,6 +69,31 @@ fun BlinkApp(repository: BlinkRepository) {
     var isPrivacySettingsOpen by remember { mutableStateOf(false) }
     var isVoiceChatOpen by remember { mutableStateOf(false) }
     var isCrmOpen by remember { mutableStateOf(false) }
+    var isNotificationsOpen by remember { mutableStateOf(false) }
+
+    // --- Active Real-Time Anonymous Random Chat Overlay (Zero Profile Needed) ---
+    if (activeRandomChat != null) {
+        AnonymousRandomChatScreen(
+            chat = activeRandomChat!!,
+            messages = randomChatMessages,
+            myAnonymousId = repository.anonymousUserId,
+            myAnonymousName = repository.anonymousUserName,
+            onSendMessage = { repository.sendRandomChatMessage(it) },
+            onSkipNext = { repository.skipRandomChat() },
+            onReport = { reason, details -> repository.reportRandomChat(reason, details) },
+            onEndChat = { repository.cancelRandomMatch() }
+        )
+        return
+    }
+
+    // --- Radar Pulse Matching Dialog for Anonymous Blink Search ---
+    if (randomMatchState == MatchState.SEARCHING) {
+        RandomBlinkSearchingDialog(
+            anonymousName = repository.anonymousUserName,
+            anonymousAvatarColor = repository.anonymousAvatarColor,
+            onCancel = { repository.cancelRandomMatch() }
+        )
+    }
 
     // --- CRM Dashboard Screen Overlay (Protected by Password: Snail1961) ---
     if (isCrmOpen) {
@@ -100,6 +133,9 @@ fun BlinkApp(repository: BlinkRepository) {
             onContinueOffline = {
                 repository.toggleOfflineMode()
                 repository.login("alex")
+            },
+            onStartAnonymousBlink = {
+                repository.startRandomMatch()
             },
             demoUsers = allUsers
         )
@@ -198,7 +234,9 @@ fun BlinkApp(repository: BlinkRepository) {
                 BlinkTopBar(
                     currentUser = currentUser,
                     isOffline = isOffline,
+                    unreadNotificationsCount = notifications.count { !it.isRead },
                     onLocationClick = { currentTab = BlinkTab.LOCATION },
+                    onNotificationsClick = { isNotificationsOpen = true },
                     onCrmClick = { isCrmOpen = true },
                     onSafetyCenterClick = { isPrivacySettingsOpen = true },
                     onCameraClick = { currentTab = BlinkTab.CAMERA },
@@ -265,16 +303,20 @@ fun BlinkApp(repository: BlinkRepository) {
                     )
                 }
 
-                // Home Tab (Feed & Stories combined)
+                // Home Tab (Feed & Stories combined with Social Media Hub)
                 BlinkTab.FEED -> {
                     FeedScreen(
                         currentUser = currentUser,
                         stories = stories,
                         posts = posts,
                         commentsMap = commentsMap,
+                        conversations = conversations,
                         onLikePost = { postId -> repository.toggleLikePost(postId) },
+                        onReactionClick = { postId, emoji -> repository.togglePostReaction(postId, emoji) },
                         onSavePost = { postId -> repository.toggleSavePost(postId) },
                         onAddComment = { postId, text -> repository.addComment(postId, text) },
+                        onSharePostToConversation = { postId, convId -> repository.sharePostToConversation(postId, convId) },
+                        onFollowCreator = { creatorUsername -> repository.followCreator(creatorUsername) },
                         onOpenStory = { story -> activeStory = story },
                         onAddStoryClick = { currentTab = BlinkTab.CAMERA },
                         onCreatePostClick = { currentTab = BlinkTab.CAMERA },
@@ -288,6 +330,9 @@ fun BlinkApp(repository: BlinkRepository) {
                                 reason = com.example.data.model.ReportReason.INAPPROPRIATE,
                                 details = "Reported post by $authorName"
                             )
+                        },
+                        onUseTrendingSound = { soundTitle ->
+                            currentTab = BlinkTab.CAMERA
                         }
                     )
                 }
@@ -427,6 +472,33 @@ fun BlinkApp(repository: BlinkRepository) {
                     }
                 }
             }
+
+            // ⚡ One-Click Floating "Blink" Match Button (Always Accessible at Bottom)
+            if (currentTab != BlinkTab.CAMERA && currentTab != BlinkTab.VIDEOS) {
+                RandomBlinkMatchFloatingButton(
+                    onClick = { repository.startRandomMatch() },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp)
+                )
+            }
+        }
+
+        // --- Social Notifications & Activity Center Bottom Sheet ---
+        if (isNotificationsOpen) {
+            NotificationsSheet(
+                notifications = notifications,
+                onDismiss = { isNotificationsOpen = false },
+                onMarkAsRead = { notifId -> repository.markNotificationAsRead(notifId) },
+                onMarkAllAsRead = { repository.markAllNotificationsAsRead() },
+                onToggleFollowBack = { notifId -> repository.toggleFollowBackNotification(notifId) },
+                onDeleteNotification = { notifId -> repository.deleteNotification(notifId) },
+                onSendBlinkStreak = {
+                    isNotificationsOpen = false
+                    currentTab = BlinkTab.CAMERA
+                }
+            )
         }
     }
 }
+

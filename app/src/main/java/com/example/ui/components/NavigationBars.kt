@@ -37,7 +37,9 @@ enum class BlinkTab(val title: String, val testTag: String) {
 fun BlinkTopBar(
     currentUser: User?,
     isOffline: Boolean = false,
+    unreadNotificationsCount: Int = 0,
     onLocationClick: () -> Unit,
+    onNotificationsClick: () -> Unit = {},
     onCrmClick: () -> Unit,
     onSafetyCenterClick: () -> Unit,
     onCameraClick: () -> Unit,
@@ -138,11 +140,47 @@ fun BlinkTopBar(
                 }
             }
 
-            // Right icons: CRM Admin, Safety Shield, Quick Camera, Avatar
+            // Right icons: Notifications, CRM Admin, Safety Shield, Quick Camera, Avatar
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
+                // Social Notifications Center Bell
+                Box(
+                    modifier = Modifier.size(38.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    IconButton(
+                        onClick = onNotificationsClick,
+                        modifier = Modifier.testTag("top_notifications_button")
+                    ) {
+                        Icon(
+                            imageVector = if (unreadNotificationsCount > 0) Icons.Default.NotificationsActive else Icons.Outlined.Notifications,
+                            contentDescription = "Notifications",
+                            tint = if (unreadNotificationsCount > 0) BlinkPinkLight else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (unreadNotificationsCount > 0) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFFEF4444),
+                            modifier = Modifier
+                                .size(16.dp)
+                                .align(Alignment.TopEnd)
+                                .offset(x = (-2).dp, y = 2.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = if (unreadNotificationsCount > 9) "9+" else "$unreadNotificationsCount",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // CRM Dashboard Button (Admin)
                 IconButton(
                     onClick = onCrmClick,

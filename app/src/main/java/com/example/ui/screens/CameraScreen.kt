@@ -59,21 +59,36 @@ import com.example.data.model.CreativeFilter
 import com.example.data.model.FilterCategory
 import com.example.data.audio.BlinkMusicPlayer
 import com.example.ui.components.camera.*
+import com.example.ui.camera.filters.CameraShaderEngine
+import com.example.ui.camera.filters.CameraShaderType
+import com.example.ui.camera.filters.FilterTweakSheet
+import com.example.ui.camera.filters.RealtimeShaderPreviewOverlay
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import com.example.ui.camera.filters.SnapchatArLensesOverlay
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.example.ui.camera.export.ExportResult
+import com.example.ui.camera.export.MediaExportEngine
+import com.example.ui.camera.studio.MediaExportProgressDialog
+import com.example.ui.camera.studio.MediaExportSuccessDialog
+import com.example.ui.camera.studio.TikTokMusicMixer
+import com.example.ui.camera.studio.VideoTimelineEditor
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.random.Random
 
 enum class VideoEditTab {
+    TIMELINE,
     FILTERS,
     MUSIC,
     TEXT,
-    STICKERS
+    STICKERS,
+    DRAWINGS,
+    FUNNY_WRITING
 }
 
 enum class DualCamLayout {
@@ -114,11 +129,39 @@ fun CameraScreen(
 
     var imageCaptureInstance by remember { mutableStateOf<ImageCapture?>(null) }
 
-    // --- Master Filter Palette (20+ Filters across 5 Categories) ---
+    // --- Master Filter Palette with OpenGL Shaders & Creative Lenses ---
     val allFilters = remember {
         listOf(
             // Normal
             CreativeFilter("normal", "Normal", "⚡", Color.Transparent, category = FilterCategory.ALL),
+
+            // ✨ Snapchat & Banuba AR Face Lenses (Iconic Dog Ears, Kitty, Golden Butterflies)
+            CreativeFilter("dog_snap", "Puppy Dog", "🐶", Color(0xFFF59E0B), category = FilterCategory.LENSES, arLensType = "dog_ears", isLense = true, overlayTitle = "Snapchat Floppy Dog Ears & Tongue"),
+            CreativeFilter("cat_snap", "Kitty Cat", "🐱", Color(0xFFF472B6), category = FilterCategory.LENSES, arLensType = "cat_ears", isLense = true, overlayTitle = "Banuba Kitty Ears & Whiskers"),
+            CreativeFilter("butterfly_snap", "Gold Butterflies", "🦋", Color(0xFFFBBF24), category = FilterCategory.LENSES, arLensType = "butterfly_crown", hasSparkles = true, isLense = true, overlayTitle = "3D Fluttering Golden Butterfly Tiara"),
+            CreativeFilter("angel_snap", "Angel Halo", "😇", Color(0xFFFDE047), category = FilterCategory.LENSES, arLensType = "angel_halo", hasSparkles = true, isLense = true, overlayTitle = "Floating Golden Ring Halo & Clouds"),
+            CreativeFilter("horns_snap", "Neon Horns", "😈", BlinkPink, category = FilterCategory.LENSES, arLensType = "neon_horns", isLense = true, overlayTitle = "Cyber Neon Magenta Horns"),
+            CreativeFilter("rainbow_snap", "Rainbow Waterfall", "🌈", Color(0xFF38BDF8), category = FilterCategory.LENSES, arLensType = "rainbow_vomit", hasSparkles = true, isLense = true, overlayTitle = "Classic Snapchat Rainbow Waterfall"),
+            CreativeFilter("bambi_snap", "Bambi Deer", "🦌", Color(0xFFD97706), category = FilterCategory.LENSES, arLensType = "bambi_deer", isLense = true, overlayTitle = "Banuba Deer Ears & Fawn Freckles"),
+            CreativeFilter("cyber_visor", "Cyber HUD Visor", "🤖", BlinkCyan, category = FilterCategory.LENSES, arLensType = "cyber_visor", isLense = true, overlayTitle = "Targeting Visor with Telemetry HUD"),
+            CreativeFilter("anime_snap", "Manga Star Eyes", "✨", Color(0xFFA855F7), category = FilterCategory.LENSES, arLensType = "anime_eyes", hasSparkles = true, isLense = true, overlayTitle = "Big Shimmering Anime Eyes"),
+            CreativeFilter("flame_snap", "Fire Flames", "🔥", Color(0xFFEF4444), category = FilterCategory.LENSES, arLensType = "flame_crown", isLense = true, overlayTitle = "Animated Comic Flame Crown"),
+            CreativeFilter("sunglasses_snap", "Aviator Shades", "🕶️", Color(0xFF1E293B), category = FilterCategory.LENSES, arLensType = "sunglasses_gold", isLense = true, overlayTitle = "Aviator Shades & Cuban Gold Chain"),
+
+            // 💄 Banuba Beauty Smoothing & Face Makeup
+            CreativeFilter("beauty_glam", "Soft Glam", "💄", Color(0xFFFB7185), category = FilterCategory.BEAUTY, arLensType = "beauty_glam", beautySmoothing = 0.95f, blushIntensity = 0.85f, hasSparkles = true, isLense = true, overlayTitle = "Porcelain Skin Smoothing & Rosy Blush"),
+            CreativeFilter("rosy_snap", "Rosy Peach", "🌸", Color(0xFFFDA4AF), category = FilterCategory.BEAUTY, arLensType = "rosy_blush", beautySmoothing = 0.85f, blushIntensity = 0.95f, hasSparkles = true, isLense = true, overlayTitle = "Soft Peach Blush & Natural Freckles"),
+            CreativeFilter("porcelain_glow", "Porcelain Radiance", "✨", Color(0xFFFFF1F2), category = FilterCategory.BEAUTY, beautySmoothing = 1.0f, blushIntensity = 0.5f, hasSparkles = true, isLense = true, overlayTitle = "Airbrushed Smooth Skin Radiance"),
+            CreativeFilter("golden_hour_beauty", "Golden Hour Glam", "☀️", Color(0xFFFFB703), category = FilterCategory.BEAUTY, beautySmoothing = 0.75f, blushIntensity = 0.7f, hasSparkles = true, isLense = true, overlayTitle = "Golden Hour Sunlit Bronzer & Shimmer"),
+
+            // GPU Shaders (✨ OpenGL & AGSL Real-Time Shaders)
+            CreativeFilter("chromatic", "Chromatic RGB", "🌈", Color(0xFF67E8F9), category = FilterCategory.SHADERS, shaderType = CameraShaderType.CHROMATIC_ABERRATION, defaultIntensity = 0.85f, overlayTitle = "RGB Split Chromatic Aberration"),
+            CreativeFilter("neon_edge", "Neon Edge", "🔮", BlinkPink, category = FilterCategory.SHADERS, shaderType = CameraShaderType.NEON_CYBER, defaultIntensity = 0.9f, overlayTitle = "Luminescent Cyber Edge Glow"),
+            CreativeFilter("vhs_wave", "VHS 90s CRT", "📼", Color(0xFFE2E8F0), scanlines = true, category = FilterCategory.SHADERS, shaderType = CameraShaderType.VHS_RETRO, defaultIntensity = 0.85f, overlayTitle = "Analog CRT Tape & Scanlines"),
+            CreativeFilter("fisheye", "Fisheye Lens", "🐟", Color(0xFF38BDF8), category = FilterCategory.SHADERS, shaderType = CameraShaderType.FISHEYE, defaultIntensity = 0.8f, overlayTitle = "Wide Barrel Action Cam Lens"),
+            CreativeFilter("thermal", "Thermal FLIR", "🔥", Color(0xFFEF4444), category = FilterCategory.SHADERS, shaderType = CameraShaderType.THERMAL_VISION, defaultIntensity = 0.9f, overlayTitle = "Heatmap Infrared Night Vision"),
+            CreativeFilter("halftone", "Pop Halftone", "📰", Color(0xFFF59E0B), category = FilterCategory.SHADERS, shaderType = CameraShaderType.HALFTONE_COMIC, defaultIntensity = 0.85f, overlayTitle = "Pop Art Comic Dot Raster"),
+            CreativeFilter("glitch_cyber", "Cyber Glitch", "⚡", Color(0xFFA855F7), isGlitch = true, category = FilterCategory.SHADERS, shaderType = CameraShaderType.GLITCH_DISTORTION, defaultIntensity = 0.85f, overlayTitle = "Digital Matrix Artifact Jitter"),
 
             // Funny Faces (🤪)
             CreativeFilter("googly", "Googly Eyes", "🤪", Color(0xFF60A5FA), vignetteAlpha = 0.25f, category = FilterCategory.FUNNY_FACES, funnyFaceType = "googly", overlayTitle = "Jiggling Cartoon Googly Eyes"),
@@ -138,25 +181,33 @@ fun CameraScreen(
             CreativeFilter("taco_chomp", "Taco Chomp", "🌮", Color(0xFFF59E0B), vignetteAlpha = 0.2f, category = FilterCategory.GAMES, gameType = "taco", overlayTitle = "Chomp Flying Tacos Rush!"),
             CreativeFilter("persona_spin", "Persona Vibe", "🎰", Color(0xFF8B5CF6), isGlitch = true, category = FilterCategory.GAMES, gameType = "roulette", overlayTitle = "Spin Your Vibe Roulette!"),
 
-            // Aesthetic (🔮)
-            CreativeFilter("sunset", "Sunset Glow", "🌅", Color(0xFFFF8A00), vignetteAlpha = 0.4f, category = FilterCategory.AESTHETIC),
+            // Aesthetic & Cinema (🔮)
+            CreativeFilter("noir", "Noir 35mm", "🎬", Color.DarkGray, vignetteAlpha = 0.55f, category = FilterCategory.AESTHETIC, shaderType = CameraShaderType.NOIR_FILM, overlayTitle = "High-Contrast Silver Halide"),
+            CreativeFilter("sunset", "Teal & Orange", "🌅", Color(0xFFFF8A00), vignetteAlpha = 0.4f, category = FilterCategory.AESTHETIC, shaderType = CameraShaderType.TEAL_ORANGE, overlayTitle = "Hollywood Cinematic Teal & Orange"),
             CreativeFilter("golden", "Golden Hour", "☀️", Color(0xFFFFB703), vignetteAlpha = 0.35f, category = FilterCategory.AESTHETIC),
-            CreativeFilter("noir", "Noir B&W", "🎬", Color.DarkGray, vignetteAlpha = 0.55f, category = FilterCategory.AESTHETIC),
+            CreativeFilter("vintage", "Vintage Kodachrome", "🎞️", Color(0xFFD97706), vignetteAlpha = 0.45f, category = FilterCategory.AESTHETIC, shaderType = CameraShaderType.VINTAGE_KODACHROME, overlayTitle = "1970s Kodachrome Film Tone"),
             CreativeFilter("vaporwave", "Vaporwave", "🌸", Color(0xFFF472B6), vignetteAlpha = 0.35f, category = FilterCategory.AESTHETIC),
             CreativeFilter("sparkle", "Aura Dream", "✨", BlinkPink, hasParticles = true, category = FilterCategory.AESTHETIC),
-            CreativeFilter("vintage", "Vintage Film", "🎞️", Color(0xFFD97706), vignetteAlpha = 0.45f, category = FilterCategory.AESTHETIC),
 
             // Cyber & Retro (🤖)
-            CreativeFilter("cyberpunk", "Cyberpunk", "🔮", BlinkCyan, vignetteAlpha = 0.35f, isGlitch = true, category = FilterCategory.CYBER),
-            CreativeFilter("vhs", "VHS 90s", "📼", Color(0xFFE2E8F0), scanlines = true, category = FilterCategory.CYBER),
-            CreativeFilter("matrix", "Emerald Matrix", "🟩", Color(0xFF10B981), vignetteAlpha = 0.4f, scanlines = true, category = FilterCategory.CYBER),
+            CreativeFilter("cyberpunk", "Cyberpunk", "🔮", BlinkCyan, vignetteAlpha = 0.35f, isGlitch = true, category = FilterCategory.CYBER, shaderType = CameraShaderType.NEON_CYBER),
+            CreativeFilter("vhs", "VHS 90s", "📼", Color(0xFFE2E8F0), scanlines = true, category = FilterCategory.CYBER, shaderType = CameraShaderType.VHS_RETRO),
+            CreativeFilter("matrix", "Emerald Matrix", "🟩", Color(0xFF10B981), vignetteAlpha = 0.4f, scanlines = true, category = FilterCategory.CYBER, shaderType = CameraShaderType.EMERALD_MATRIX),
             CreativeFilter("frost", "Sub-Zero Ice", "❄️", Color(0xFF38BDF8), vignetteAlpha = 0.35f, category = FilterCategory.CYBER),
-            CreativeFilter("neon_glitch", "Neon Glitch", "⚡", Color(0xFFA855F7), isGlitch = true, category = FilterCategory.CYBER)
+            CreativeFilter("neon_glitch", "Neon Glitch", "⚡", Color(0xFFA855F7), isGlitch = true, category = FilterCategory.CYBER, shaderType = CameraShaderType.GLITCH_DISTORTION)
         )
     }
 
     var selectedCategory by remember { mutableStateOf(FilterCategory.ALL) }
     var selectedFilter by remember { mutableStateOf(allFilters[0]) }
+
+    // Real-Time Shader Controls & Parameters
+    var shaderIntensity by remember { mutableFloatStateOf(0.85f) }
+    var shaderWarmth by remember { mutableFloatStateOf(0.0f) }
+    var shaderScanlines by remember { mutableStateOf(false) }
+    var isComparingOriginal by remember { mutableStateOf(false) }
+    var isShaderTweakSheetOpen by remember { mutableStateOf(false) }
+    var isRightRailCollapsed by remember { mutableStateOf(false) }
 
     val displayedFilters = remember(selectedCategory) {
         if (selectedCategory == FilterCategory.ALL) allFilters
@@ -168,6 +219,7 @@ fun CameraScreen(
     var isRecording by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableStateOf(0) }
     var isFrontCamera by remember { mutableStateOf(false) }
+    var flipFeedbackMessage by remember { mutableStateOf<String?>(null) }
     var isFlashOn by remember { mutableStateOf(false) }
     var isDualCamMode by remember { mutableStateOf(false) }
     var dualCamLayout by remember { mutableStateOf(DualCamLayout.PIP_TOP_RIGHT) }
@@ -184,13 +236,30 @@ fun CameraScreen(
     // Video Post-Production State
     var activeVideoEditTab by remember { mutableStateOf(VideoEditTab.FILTERS) }
     var isVideoPlaying by remember { mutableStateOf(true) }
-    var playbackProgress by remember { mutableStateOf(0.35f) }
+    var playbackProgress by remember { mutableFloatStateOf(0.35f) }
     var selectedMusicTrack by remember { mutableStateOf("⚡ Tokyo Drift Synthwave") }
     var isAudioMuted by remember { mutableStateOf(false) }
     var customVideoText by remember { mutableStateOf("") }
     var videoTextColor by remember { mutableStateOf(Color.White) }
-    var videoTextBgStyle by remember { mutableStateOf("glow") } // "glow", "pill", "none"
+    var videoTextBgStyle by remember { mutableStateOf("glow") } // "glow", "pill", "neon", "none"
+    var videoTextStyle by remember { mutableStateOf("Classic") } // "Classic", "Typewriter", "Heavy Impact", "Neon Glow"
     val videoStickers = remember { mutableStateListOf<String>() }
+    var activeFunnyWriting by remember { mutableStateOf("") }
+
+    // TikTok Music & Dual Volume Mixing State
+    var originalAudioVolume by remember { mutableFloatStateOf(1.0f) }
+    var musicTrackVolume by remember { mutableFloatStateOf(0.85f) }
+
+    // Video Timeline, Trimming & Scrubbing State
+    var videoTrimStartSec by remember { mutableFloatStateOf(0f) }
+    var videoTrimEndSec by remember { mutableFloatStateOf(15f) }
+    var videoCurrentPositionSec by remember { mutableFloatStateOf(0f) }
+
+    // Export & Sharing Studio State
+    var isExporting by remember { mutableStateOf(false) }
+    var exportProgress by remember { mutableFloatStateOf(0f) }
+    var exportResult by remember { mutableStateOf<ExportResult?>(null) }
+    var showExportSuccessDialog by remember { mutableStateOf(false) }
 
     // Interactive Game Mechanics
     var gameScore by remember { mutableStateOf(0) }
@@ -222,9 +291,9 @@ fun CameraScreen(
     var cameraTextColor by remember { mutableStateOf(Color.White) }
     var cameraTextBgStyle by remember { mutableStateOf("pill") }
 
-    // 3. Music (Saved Internet Music: Bongo Flava, Afrobeat, Dramatic, Comedy, EDM)
+    // 3. Music (Any song from any singer/artist: Taylor Swift, The Weeknd, Adele, Drake, Billie Eilish, etc.)
     var isMusicPickerOpen by remember { mutableStateOf(false) }
-    var cameraSelectedMusic by remember { mutableStateOf("🌴 Bongo Flava Vibe - Dar es Salaam All-Stars") }
+    var cameraSelectedMusic by remember { mutableStateOf("Cruel Summer - Taylor Swift") }
     var cameraSongSearchQuery by remember { mutableStateOf("") }
     var isSongSearchExpanded by remember { mutableStateOf(false) }
 
@@ -360,6 +429,44 @@ fun CameraScreen(
             canvas.drawText(activeCameraText, 540f, textY, liveTextPaint)
         }
 
+        // Draw Review Studio Custom Video Text if added
+        if (customVideoText.isNotBlank()) {
+            val videoTextPaint = Paint().apply {
+                color = videoTextColor.hashCode()
+                textSize = 54f
+                isFakeBoldText = true
+                isAntiAlias = true
+                textAlign = Paint.Align.CENTER
+            }
+            val textY = 720f
+            val bgPaint = Paint().apply {
+                color = if (videoTextBgStyle == "glow") 0xBB7C3AED.toInt() else 0xCC000000.toInt()
+                style = Paint.Style.FILL
+            }
+            val textWidth = videoTextPaint.measureText(customVideoText)
+            canvas.drawRoundRect(540f - textWidth / 2f - 28f, textY - 56f, 540f + textWidth / 2f + 28f, textY + 22f, 22f, 22f, bgPaint)
+            canvas.drawText(customVideoText, 540f, textY, videoTextPaint)
+        }
+
+        // Draw Funny Writing Meme Sticker if selected
+        if (activeFunnyWriting.isNotBlank()) {
+            val funnyPaint = Paint().apply {
+                color = android.graphics.Color.WHITE
+                textSize = 48f
+                isFakeBoldText = true
+                isAntiAlias = true
+                textAlign = Paint.Align.CENTER
+            }
+            val funnyBg = Paint().apply {
+                color = 0xDD0F172A.toInt()
+                style = Paint.Style.FILL
+            }
+            val funnyWidth = funnyPaint.measureText(activeFunnyWriting)
+            val funnyY = 820f
+            canvas.drawRoundRect(540f - funnyWidth / 2f - 28f, funnyY - 52f, 540f + funnyWidth / 2f + 28f, funnyY + 20f, 20f, 20f, funnyBg)
+            canvas.drawText(activeFunnyWriting, 540f, funnyY, funnyPaint)
+        }
+
         val textPaint = Paint().apply {
             color = android.graphics.Color.WHITE
             textSize = 44f
@@ -375,8 +482,22 @@ fun CameraScreen(
         val musicTag = if (cameraSelectedMusic.isNotBlank()) " • 🎵 $cameraSelectedMusic" else ""
         canvas.drawText("Filter: ${filter.name}$musicTag", 60f, 1350f, textPaint)
 
+        // Apply Real-Time GPU Color Matrix and Shader Post-Processing to captured Bitmap
+        val processedBitmap = if (filter.shaderType != CameraShaderType.NONE || filter.vignetteAlpha > 0.05f || filter.scanlines || shaderScanlines) {
+            CameraShaderEngine.applyFilterToBitmap(
+                source = bitmap,
+                shaderType = filter.shaderType,
+                intensity = shaderIntensity,
+                warmth = shaderWarmth,
+                hasScanlines = filter.scanlines || shaderScanlines,
+                vignetteAlpha = filter.vignetteAlpha
+            )
+        } else {
+            bitmap
+        }
+
         FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+            processedBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
         }
         return Uri.fromFile(file)
     }
@@ -486,40 +607,42 @@ fun CameraScreen(
         // --- Viewfinder Layer ---
         Box(modifier = Modifier.fillMaxSize()) {
             if (hasCameraPermission) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        val previewView = PreviewView(ctx)
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                        cameraProviderFuture.addListener({
-                            try {
-                                val cameraProvider = cameraProviderFuture.get()
-                                val preview = Preview.Builder().build().also {
-                                    it.surfaceProvider = previewView.surfaceProvider
-                                }
-                                val imageCapture = ImageCapture.Builder().build()
-                                imageCaptureInstance = imageCapture
+                key(isFrontCamera) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            val previewView = PreviewView(ctx)
+                            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                            cameraProviderFuture.addListener({
+                                try {
+                                    val cameraProvider = cameraProviderFuture.get()
+                                    val preview = Preview.Builder().build().also {
+                                        it.surfaceProvider = previewView.surfaceProvider
+                                    }
+                                    val imageCapture = ImageCapture.Builder().build()
+                                    imageCaptureInstance = imageCapture
 
-                                val cameraSelector = if (isFrontCamera) {
-                                    CameraSelector.DEFAULT_FRONT_CAMERA
-                                } else {
-                                    CameraSelector.DEFAULT_BACK_CAMERA
-                                }
+                                    val cameraSelector = if (isFrontCamera) {
+                                        CameraSelector.DEFAULT_FRONT_CAMERA
+                                    } else {
+                                        CameraSelector.DEFAULT_BACK_CAMERA
+                                    }
 
-                                cameraProvider.unbindAll()
-                                cameraProvider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    cameraSelector,
-                                    preview,
-                                    imageCapture
-                                )
-                            } catch (exc: Exception) {
-                                // Handled gracefully
-                            }
-                        }, ContextCompat.getMainExecutor(ctx))
-                        previewView
-                    }
-                )
+                                    cameraProvider.unbindAll()
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        cameraSelector,
+                                        preview,
+                                        imageCapture
+                                    )
+                                } catch (exc: Exception) {
+                                    // Handled gracefully
+                                }
+                            }, ContextCompat.getMainExecutor(ctx))
+                            previewView
+                        }
+                    )
+                }
             } else {
                 Box(
                     modifier = Modifier
@@ -547,25 +670,108 @@ fun CameraScreen(
                 }
             }
 
-            // --- Realtime Filter Shaders, Glitches & Particle Overlays ---
-            if (selectedFilter.id != "normal") {
+            // --- Real-Time OpenGL / Compose Shader & Color Grading Layer ---
+            RealtimeShaderPreviewOverlay(
+                filter = selectedFilter,
+                intensity = shaderIntensity,
+                warmth = shaderWarmth,
+                isComparingOriginal = isComparingOriginal,
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // --- Snapchat & Banuba Face AR Lenses & Beauty Engine ---
+            SnapchatArLensesOverlay(
+                filter = selectedFilter,
+                intensity = shaderIntensity,
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // --- Viewfinder Gestures: Swipe Left/Right = Switch Filters; Double Tap = Flip Front/Back Camera ---
+            if (!isDrawingModeActive && !capturedSnapReady && (selectedFilter.gameType.isBlank() || gameScore == 0)) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(selectedFilter.tintColor.copy(alpha = selectedFilter.vignetteAlpha))
+                        .pointerInput(displayedFilters, selectedFilter) {
+                            var totalDragDistanceX = 0f
+                            detectHorizontalDragGestures(
+                                onDragStart = { totalDragDistanceX = 0f },
+                                onDragEnd = {
+                                    if (totalDragDistanceX < -40f) {
+                                        // Swipe Left -> Next filter / lens
+                                        val currentIndex = displayedFilters.indexOfFirst { it.id == selectedFilter.id }
+                                        if (currentIndex != -1 && displayedFilters.isNotEmpty()) {
+                                            val nextIndex = (currentIndex + 1) % displayedFilters.size
+                                            selectedFilter = displayedFilters[nextIndex]
+                                            shaderIntensity = selectedFilter.defaultIntensity
+                                            shaderScanlines = selectedFilter.scanlines
+                                            renewToastMessage = "✨ ${selectedFilter.name} ${selectedFilter.iconEmoji}"
+                                            coroutineScope.launch {
+                                                delay(1300)
+                                                if (renewToastMessage?.contains(selectedFilter.name) == true) {
+                                                    renewToastMessage = null
+                                                }
+                                            }
+                                        }
+                                    } else if (totalDragDistanceX > 40f) {
+                                        // Swipe Right -> Previous filter / lens
+                                        val currentIndex = displayedFilters.indexOfFirst { it.id == selectedFilter.id }
+                                        if (currentIndex != -1 && displayedFilters.isNotEmpty()) {
+                                            val prevIndex = if (currentIndex - 1 < 0) displayedFilters.size - 1 else currentIndex - 1
+                                            selectedFilter = displayedFilters[prevIndex]
+                                            shaderIntensity = selectedFilter.defaultIntensity
+                                            shaderScanlines = selectedFilter.scanlines
+                                            renewToastMessage = "✨ ${selectedFilter.name} ${selectedFilter.iconEmoji}"
+                                            coroutineScope.launch {
+                                                delay(1300)
+                                                if (renewToastMessage?.contains(selectedFilter.name) == true) {
+                                                    renewToastMessage = null
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                onHorizontalDrag = { _, dragAmount ->
+                                    totalDragDistanceX += dragAmount
+                                }
+                            )
+                        }
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    isFrontCamera = !isFrontCamera
+                                    flipFeedbackMessage = if (isFrontCamera) "🤳 Front Camera" else "📷 Back Camera"
+                                    coroutineScope.launch {
+                                        delay(1300)
+                                        flipFeedbackMessage = null
+                                    }
+                                }
+                            )
+                        }
                 )
             }
 
-            if (selectedFilter.scanlines) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.2f), Color.Transparent)
-                            )
+            // Quick Flip Camera Feedback Toast Pill
+            if (flipFeedbackMessage != null) {
+                Surface(
+                    modifier = Modifier.align(Alignment.Center),
+                    shape = RoundedCornerShape(24.dp),
+                    color = Color.Black.copy(alpha = 0.8f),
+                    border = BorderStroke(1.5.dp, BlinkCyan)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.FlipCameraAndroid, contentDescription = null, tint = BlinkCyan, modifier = Modifier.size(24.dp))
+                        Text(
+                            text = flipFeedbackMessage!!,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
                         )
-                )
+                    }
+                }
             }
 
             // --- Funny Faces AR Graphical Overlays ---
@@ -621,7 +827,7 @@ fun CameraScreen(
                 )
             }
 
-            // Top Status Overlay (Video Recording Active Indicator)
+            // Top Status Overlay (Video Recording Active Indicator - Electric Blue Theme)
             if (isRecording) {
                 Row(
                     modifier = Modifier
@@ -629,9 +835,11 @@ fun CameraScreen(
                         .statusBarsPadding()
                         .padding(top = 16.dp)
                         .clip(RoundedCornerShape(20.dp))
-                        .background(BlinkPink)
-                        .border(1.dp, Color.White, RoundedCornerShape(20.dp))
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                        .background(
+                            Brush.horizontalGradient(listOf(Color(0xFF0284C7), Color(0xFF00E5FF)))
+                        )
+                        .border(1.5.dp, Color.White, RoundedCornerShape(20.dp))
+                        .padding(horizontal = 16.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
@@ -642,9 +850,9 @@ fun CameraScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "🔴 REC 00:${if (recordingSeconds < 10) "0$recordingSeconds" else recordingSeconds} / 00:30",
+                        text = "🔵 REC 00:${if (recordingSeconds < 10) "0$recordingSeconds" else recordingSeconds} • Release to Stop",
                         color = Color.White,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.Black,
                         fontSize = 13.sp
                     )
                 }
@@ -735,47 +943,131 @@ fun CameraScreen(
             }
         }
 
-        // --- Vertical Right Side Tool Rail (Top to Bottom) ---
-        CameraRightRail(
-            isTalkingSelfieActive = isTalkingSelfieActive,
-            onToggleTalkingSelfie = { isTalkingSelfieActive = !isTalkingSelfieActive },
-            isTextActive = activeCameraText.isNotBlank() || isTextToolOpen,
-            onOpenTextTool = { isTextToolOpen = true },
-            hasMusicSelected = cameraSelectedMusic.isNotBlank(),
-            onOpenMusicPicker = { isMusicPickerOpen = true },
-            onOpenVideoEdit = { isVideoEditPanelOpen = true },
-            onOpenAddFilter = { isAddFilterSheetOpen = true },
-            onRenewFilter = {
-                val remaining = allFilters.filter { it.id != selectedFilter.id }
-                val next = remaining.random()
-                selectedFilter = next
-                renewToastMessage = "✨ Renewed to: ${next.name} ${next.iconEmoji}"
-                BlinkMusicPlayer.playSoundEffect("squeak")
-                coroutineScope.launch {
-                    delay(2200)
-                    if (renewToastMessage?.contains(next.name) == true) {
+        // --- Conditional Vertical Right Tool Rail ---
+        // Features disappear when recording, in drawing mode, text tool open, search open, or manually collapsed
+        val shouldHideRightRail = isRecording ||
+            isDrawingModeActive ||
+            isTextToolOpen ||
+            isSongSearchExpanded ||
+            capturedSnapReady ||
+            (selectedFilter.gameType.isNotBlank() && gameScore > 0)
+
+        AnimatedVisibility(
+            visible = !shouldHideRightRail,
+            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.TopEnd)
+        ) {
+            CameraRightRail(
+                isTalkingSelfieActive = isTalkingSelfieActive,
+                onToggleTalkingSelfie = { isTalkingSelfieActive = !isTalkingSelfieActive },
+                isTextActive = activeCameraText.isNotBlank() || isTextToolOpen,
+                onOpenTextTool = { isTextToolOpen = true },
+                hasMusicSelected = cameraSelectedMusic.isNotBlank(),
+                onOpenMusicPicker = { isMusicPickerOpen = true },
+                isVideoMode = isVideoMode,
+                onOpenVideoEdit = { isVideoEditPanelOpen = true },
+                isCreativeFilterActive = selectedFilter.id != "normal",
+                onOpenAddFilter = { isAddFilterSheetOpen = true },
+                onRenewFilter = {
+                    val remaining = allFilters.filter { it.id != selectedFilter.id }
+                    val next = remaining.random()
+                    selectedFilter = next
+                    shaderIntensity = next.defaultIntensity
+                    renewToastMessage = "✨ Renewed to: ${next.name} ${next.iconEmoji}"
+                    BlinkMusicPlayer.playSoundEffect("squeak")
+                    coroutineScope.launch {
+                        delay(2200)
+                        if (renewToastMessage?.contains(next.name) == true) {
+                            renewToastMessage = null
+                        }
+                    }
+                },
+                onChangeFilter = {
+                    val idx = allFilters.indexOfFirst { it.id == selectedFilter.id }
+                    val nextIdx = (idx + 1) % allFilters.size
+                    selectedFilter = allFilters[nextIdx]
+                    shaderIntensity = selectedFilter.defaultIntensity
+                    renewToastMessage = "Switched to ${selectedFilter.name} ${selectedFilter.iconEmoji}"
+                    coroutineScope.launch {
+                        delay(1600)
                         renewToastMessage = null
                     }
+                },
+                onOpenShaderTweak = { isShaderTweakSheetOpen = true },
+                isFacePaintingActive = activeFacePaintType != "none",
+                onOpenFacePainting = { isFacePaintingOpen = true },
+                isDrawingModeActive = isDrawingModeActive,
+                onToggleDrawingMode = { isDrawingModeActive = !isDrawingModeActive },
+                isSoundboardActive = isSoundboardOpen,
+                onToggleSoundboard = { isSoundboardOpen = !isSoundboardOpen },
+                isCollapsed = isRightRailCollapsed,
+                onToggleCollapsed = { isRightRailCollapsed = !isRightRailCollapsed }
+            )
+        }
+
+        // --- Floating Real-Time Shader Controls HUD ---
+        // 1. "Hold to Compare" Button (Real-Time Before/After Preview)
+        if (selectedFilter.id != "normal" && !isRecording && !capturedSnapReady && !isDrawingModeActive) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 76.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onPress = {
+                                isComparingOriginal = true
+                                tryAwaitRelease()
+                                isComparingOriginal = false
+                            }
+                        )
+                    }
+                    .testTag("hold_to_compare_button"),
+                shape = RoundedCornerShape(20.dp),
+                color = if (isComparingOriginal) BlinkPink.copy(alpha = 0.90f) else Color.Black.copy(alpha = 0.60f),
+                border = BorderStroke(1.dp, if (isComparingOriginal) Color.White else BlinkCyan.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = if (isComparingOriginal) "⚡ Original Raw" else "👁️ Hold to Compare",
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
-            },
-            onChangeFilter = {
-                val idx = allFilters.indexOfFirst { it.id == selectedFilter.id }
-                val nextIdx = (idx + 1) % allFilters.size
-                selectedFilter = allFilters[nextIdx]
-                renewToastMessage = "Switched to ${selectedFilter.name} ${selectedFilter.iconEmoji}"
-                coroutineScope.launch {
-                    delay(1600)
-                    renewToastMessage = null
+            }
+        }
+
+        // 2. Floating Shader Intensity Tuning Pill
+        if (selectedFilter.id != "normal" && !isRecording && !capturedSnapReady && !isDrawingModeActive) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 195.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { isShaderTweakSheetOpen = true }
+                    .testTag("shader_intensity_hud_pill"),
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.70f),
+                border = BorderStroke(1.dp, BlinkCyan.copy(alpha = 0.45f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(text = "✨ ${selectedFilter.name}", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text(text = "${(shaderIntensity * 100).toInt()}%", color = BlinkCyanLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Icon(imageVector = Icons.Default.Tune, contentDescription = "Tweak Shader", tint = BlinkCyanLight, modifier = Modifier.size(13.dp))
                 }
-            },
-            isFacePaintingActive = activeFacePaintType != "none",
-            onOpenFacePainting = { isFacePaintingOpen = true },
-            isDrawingModeActive = isDrawingModeActive,
-            onToggleDrawingMode = { isDrawingModeActive = !isDrawingModeActive },
-            isSoundboardActive = isSoundboardOpen,
-            onToggleSoundboard = { isSoundboardOpen = !isSoundboardOpen },
-            modifier = Modifier.align(Alignment.TopEnd)
-        )
+            }
+        }
 
         // Drawing Mode Floating Toolbar
         CameraDrawingToolbar(
@@ -876,6 +1168,24 @@ fun CameraScreen(
             },
             onDismiss = { isMusicPickerOpen = false }
         )
+
+        if (isShaderTweakSheetOpen) {
+            FilterTweakSheet(
+                filter = selectedFilter,
+                intensity = shaderIntensity,
+                onIntensityChange = { shaderIntensity = it },
+                warmth = shaderWarmth,
+                onWarmthChange = { shaderWarmth = it },
+                hasScanlines = shaderScanlines || selectedFilter.scanlines,
+                onToggleScanlines = { shaderScanlines = it },
+                onResetDefaults = {
+                    shaderIntensity = selectedFilter.defaultIntensity
+                    shaderWarmth = 0f
+                    shaderScanlines = selectedFilter.scanlines
+                },
+                onDismiss = { isShaderTweakSheetOpen = false }
+            )
+        }
 
         CameraVideoEditDialog(
             visible = isVideoEditPanelOpen,
@@ -1088,7 +1398,11 @@ fun CameraScreen(
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .clickable { selectedFilter = filter }
+                            .clickable {
+                                selectedFilter = filter
+                                shaderIntensity = filter.defaultIntensity
+                                shaderScanlines = filter.scanlines
+                            }
                             .testTag("filter_item_${filter.id}")
                     ) {
                         Box(
@@ -1154,61 +1468,112 @@ fun CameraScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Shutter Button (Tap for Photo, Tap/Hold for Video)
+            // Shutter Button (Tap = Photo, Hold = Record in Blue, Release = Stop)
             Box(
                 modifier = Modifier
-                    .size(80.dp)
-                    .clip(CircleShape)
-                    .border(4.dp, if (isVideoMode) BlinkPink else Color.White, CircleShape)
-                    .padding(6.dp)
-                    .clip(CircleShape)
-                    .background(if (isRecording) BlinkPink else if (isVideoMode) BlinkPink.copy(alpha = 0.85f) else Color.White)
+                    .size(92.dp)
                     .testTag("camera_shutter_button")
-                    .pointerInput(isVideoMode, isRecording) {
+                    .pointerInput(selectedFilter) {
                         detectTapGestures(
                             onTap = {
-                                if (isVideoMode) {
-                                    if (isRecording) {
-                                        // Stop video recording
-                                        isRecording = false
-                                        val realUri = generateRealMedia(selectedFilter, isVideo = true)
-                                        capturedImageUri = realUri
-                                        isRecordedVideo = true
-                                        capturedSnapReady = true
-                                    } else {
-                                        // Start video recording
-                                        isRecording = true
-                                    }
+                                if (isRecording) {
+                                    isRecording = false
+                                    val realUri = generateRealMedia(selectedFilter, isVideo = true)
+                                    capturedImageUri = realUri
+                                    isRecordedVideo = true
+                                    capturedSnapReady = true
                                 } else {
                                     executePhotoCapture()
                                 }
                             },
-                            onLongPress = {
-                                if (!isRecording) {
-                                    isVideoMode = true
+                            onPress = {
+                                var heldAsVideo = false
+                                val holdTimer = coroutineScope.launch {
+                                    delay(200) // 200ms hold threshold
+                                    heldAsVideo = true
                                     isRecording = true
+                                    isVideoMode = true
+                                }
+                                tryAwaitRelease()
+                                holdTimer.cancel()
+                                if (heldAsVideo || isRecording) {
+                                    // Released -> Stop video recording!
+                                    isRecording = false
+                                    val realUri = generateRealMedia(selectedFilter, isVideo = true)
+                                    capturedImageUri = realUri
+                                    isRecordedVideo = true
+                                    capturedSnapReady = true
                                 }
                             }
                         )
                     },
                 contentAlignment = Alignment.Center
             ) {
+                // Electric Blue Glowing Ring & Circular Timer when Recording
                 if (isRecording) {
                     Box(
                         modifier = Modifier
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color.White)
+                            .size(92.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF00E5FF).copy(alpha = 0.25f))
                     )
-                } else if (isVideoMode) {
-                    Icon(
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = "Record",
-                        tint = Color.White,
-                        modifier = Modifier.size(28.dp)
+                    CircularProgressIndicator(
+                        progress = { recordingSeconds / 30f },
+                        color = Color(0xFF00E5FF),
+                        trackColor = Color.White.copy(alpha = 0.25f),
+                        strokeWidth = 4.dp,
+                        modifier = Modifier.size(90.dp)
                     )
                 }
+
+                // Inner Shutter Button
+                Box(
+                    modifier = Modifier
+                        .size(76.dp)
+                        .clip(CircleShape)
+                        .border(
+                            4.dp,
+                            if (isRecording) Color(0xFF00E5FF)
+                            else if (isVideoMode) BlinkPink
+                            else Color.White,
+                            CircleShape
+                        )
+                        .padding(5.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isRecording) Color(0xFF00E5FF)
+                            else if (isVideoMode) BlinkPink
+                            else Color.White
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isRecording) {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.White)
+                        )
+                    } else if (isVideoMode) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = "Record",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
             }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Shutter gesture guide hint
+            Text(
+                text = if (isRecording) "🔵 Release to Stop & Review" else "Tap = Photo 📷 • Hold = Video 🔵",
+                color = if (isRecording) Color(0xFF00E5FF) else Color.White.copy(alpha = 0.75f),
+                fontSize = 11.sp,
+                fontWeight = if (isRecording) FontWeight.Bold else FontWeight.Normal
+            )
         }
 
         // --- Custom AI Filter Dialog ---
@@ -1375,45 +1740,75 @@ fun CameraScreen(
                         }
 
                         // Realtime Filter Shader Applied ON TOP of Video
-                        if (selectedFilter.id != "normal") {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(selectedFilter.tintColor.copy(alpha = selectedFilter.vignetteAlpha))
-                            )
-                        }
+                        RealtimeShaderPreviewOverlay(
+                            filter = selectedFilter,
+                            intensity = shaderIntensity,
+                            warmth = shaderWarmth,
+                            isComparingOriginal = isComparingOriginal,
+                            modifier = Modifier.fillMaxSize()
+                        )
+
+                        // Snapchat AR Lenses Overlay (Dog ears, angel halo, neon horns, flower crown, etc.)
+                        SnapchatArLensesOverlay(
+                            filter = selectedFilter,
+                            intensity = shaderIntensity,
+                            modifier = Modifier.fillMaxSize()
+                        )
 
                         // Funny Face Graphic on Video
                         if (selectedFilter.funnyFaceType.isNotBlank()) {
                             FunnyFaceOverlay(type = selectedFilter.funnyFaceType)
                         }
 
-                        // Custom Video Text Overlay
+                        // Custom Video Text Overlay (TikTok Style)
                         if (customVideoText.isNotBlank()) {
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.Center)
                                     .padding(16.dp)
-                                    .clip(RoundedCornerShape(12.dp))
+                                    .clip(RoundedCornerShape(14.dp))
                                     .background(
                                         when (videoTextBgStyle) {
-                                            "pill" -> Color.Black.copy(alpha = 0.75f)
-                                            "glow" -> BlinkPrimary.copy(alpha = 0.4f)
+                                            "pill" -> Color.Black.copy(alpha = 0.82f)
+                                            "glow" -> BlinkPrimary.copy(alpha = 0.55f)
+                                            "neon" -> Color(0xFF0F172A).copy(alpha = 0.88f)
                                             else -> Color.Transparent
                                         }
                                     )
                                     .border(
-                                        if (videoTextBgStyle == "glow") 1.dp else 0.dp,
-                                        BlinkCyan,
-                                        RoundedCornerShape(12.dp)
+                                        when (videoTextBgStyle) {
+                                            "glow" -> 1.5.dp
+                                            "neon" -> 2.dp
+                                            else -> 0.dp
+                                        },
+                                        when (videoTextBgStyle) {
+                                            "neon" -> BlinkCyan
+                                            "glow" -> BlinkPink
+                                            else -> Color.Transparent
+                                        },
+                                        RoundedCornerShape(14.dp)
                                     )
-                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
                             ) {
                                 Text(
                                     text = customVideoText,
                                     color = videoTextColor,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Black
+                                    fontSize = when (videoTextStyle) {
+                                        "Heavy Impact" -> 24.sp
+                                        "Typewriter" -> 19.sp
+                                        else -> 21.sp
+                                    },
+                                    fontFamily = when (videoTextStyle) {
+                                        "Typewriter" -> FontFamily.Monospace
+                                        "Heavy Impact" -> FontFamily.SansSerif
+                                        "Serif" -> FontFamily.Serif
+                                        else -> FontFamily.Default
+                                    },
+                                    fontWeight = when (videoTextStyle) {
+                                        "Typewriter" -> FontWeight.Medium
+                                        "Neon Glow" -> FontWeight.SemiBold
+                                        else -> FontWeight.Black
+                                    }
                                 )
                             }
                         }
@@ -1428,6 +1823,75 @@ fun CameraScreen(
                             ) {
                                 videoStickers.forEach { sticker ->
                                     Text(text = sticker, fontSize = 28.sp)
+                                }
+                            }
+                        }
+
+                        // Funny Writing Meme Sticker Badge
+                        if (activeFunnyWriting.isNotBlank()) {
+                            Surface(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .padding(16.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                color = Color.Black.copy(alpha = 0.82f),
+                                border = BorderStroke(2.dp, BlinkCyanLight)
+                            ) {
+                                Text(
+                                    text = activeFunnyWriting,
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Black,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+
+                        // Drawing Canvas Layer in Review Studio (Supports drawing on top of photo/video)
+                        Canvas(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (activeVideoEditTab == VideoEditTab.DRAWINGS) {
+                                        Modifier.pointerInput(Unit) {
+                                            detectDragGestures(
+                                                onDragStart = { offset ->
+                                                    currentStrokePoints.clear()
+                                                    currentStrokePoints.add(offset)
+                                                },
+                                                onDrag = { change, _ ->
+                                                    change.consume()
+                                                    currentStrokePoints.add(change.position)
+                                                },
+                                                onDragEnd = {
+                                                    if (currentStrokePoints.size > 1) {
+                                                        drawnStrokes.add(
+                                                            DrawnStroke(
+                                                                points = currentStrokePoints.toList(),
+                                                                color = currentPenColor,
+                                                                strokeWidth = currentStrokeWidth,
+                                                                isGlow = isGlowPen
+                                                            )
+                                                        )
+                                                    }
+                                                    currentStrokePoints.clear()
+                                                }
+                                            )
+                                        }
+                                    } else Modifier
+                                )
+                        ) {
+                            drawnStrokes.forEach { stroke ->
+                                if (stroke.points.size > 1) {
+                                    for (i in 0 until stroke.points.size - 1) {
+                                        drawLine(
+                                            color = stroke.color,
+                                            start = stroke.points[i],
+                                            end = stroke.points[i + 1],
+                                            strokeWidth = stroke.strokeWidth,
+                                            cap = StrokeCap.Round
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1505,98 +1969,102 @@ fun CameraScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     // --- Post-Production Editing Tool Tabs ---
-                    Row(
+                    LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
                             .background(BlinkCardDark)
-                            .padding(4.dp),
-                        horizontalArrangement = Arrangement.SpaceAround
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        VideoEditorTabButton(
-                            title = "🎨 Filter",
-                            isSelected = activeVideoEditTab == VideoEditTab.FILTERS,
-                            testTag = "edit_tab_filters"
-                        ) { activeVideoEditTab = VideoEditTab.FILTERS }
-
-                        VideoEditorTabButton(
-                            title = "🎵 Music",
-                            isSelected = activeVideoEditTab == VideoEditTab.MUSIC,
-                            testTag = "edit_tab_music"
-                        ) { activeVideoEditTab = VideoEditTab.MUSIC }
-
-                        VideoEditorTabButton(
-                            title = "✍️ Text",
-                            isSelected = activeVideoEditTab == VideoEditTab.TEXT,
-                            testTag = "edit_tab_text"
-                        ) { activeVideoEditTab = VideoEditTab.TEXT }
-
-                        VideoEditorTabButton(
-                            title = "🌟 Stickers",
-                            isSelected = activeVideoEditTab == VideoEditTab.STICKERS,
-                            testTag = "edit_tab_stickers"
-                        ) { activeVideoEditTab = VideoEditTab.STICKERS }
+                        if (isRecordedVideo) {
+                            item {
+                                VideoEditorTabButton(
+                                    title = "⏱️ Timeline",
+                                    isSelected = activeVideoEditTab == VideoEditTab.TIMELINE,
+                                    testTag = "edit_tab_timeline"
+                                ) { activeVideoEditTab = VideoEditTab.TIMELINE }
+                            }
+                        }
+                        item {
+                            VideoEditorTabButton(
+                                title = "🎨 Filter",
+                                isSelected = activeVideoEditTab == VideoEditTab.FILTERS,
+                                testTag = "edit_tab_filters"
+                            ) { activeVideoEditTab = VideoEditTab.FILTERS }
+                        }
+                        item {
+                            VideoEditorTabButton(
+                                title = "🎵 Music",
+                                isSelected = activeVideoEditTab == VideoEditTab.MUSIC,
+                                testTag = "edit_tab_music"
+                            ) { activeVideoEditTab = VideoEditTab.MUSIC }
+                        }
+                        item {
+                            VideoEditorTabButton(
+                                title = "✍️ Text",
+                                isSelected = activeVideoEditTab == VideoEditTab.TEXT,
+                                testTag = "edit_tab_text"
+                            ) { activeVideoEditTab = VideoEditTab.TEXT }
+                        }
+                        item {
+                            VideoEditorTabButton(
+                                title = "🌟 Stickers",
+                                isSelected = activeVideoEditTab == VideoEditTab.STICKERS,
+                                testTag = "edit_tab_stickers"
+                            ) { activeVideoEditTab = VideoEditTab.STICKERS }
+                        }
+                        item {
+                            VideoEditorTabButton(
+                                title = "✏️ Draw",
+                                isSelected = activeVideoEditTab == VideoEditTab.DRAWINGS,
+                                testTag = "edit_tab_drawings"
+                            ) { activeVideoEditTab = VideoEditTab.DRAWINGS }
+                        }
+                        item {
+                            VideoEditorTabButton(
+                                title = "🤪 Funny",
+                                isSelected = activeVideoEditTab == VideoEditTab.FUNNY_WRITING,
+                                testTag = "edit_tab_funny_writing"
+                            ) { activeVideoEditTab = VideoEditTab.FUNNY_WRITING }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
 
                     // --- Tool Sub-Panels ---
-                    Box(modifier = Modifier.fillMaxWidth().height(90.dp)) {
+                    Box(modifier = Modifier.fillMaxWidth().height(150.dp)) {
                         when (activeVideoEditTab) {
-                            // 1. FILTERS: Live filter applicator on video
-                            VideoEditTab.FILTERS -> {
-                                LazyRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            // 0. TIMELINE (for video): Scrubber, trimmer, playhead, speed control
+                            VideoEditTab.TIMELINE -> {
+                                val clipDuration = recordingSeconds.coerceAtLeast(3).toFloat()
+                                VideoTimelineEditor(
+                                    totalDurationSec = clipDuration,
+                                    currentPositionSec = videoCurrentPositionSec,
+                                    trimStartSec = videoTrimStartSec,
+                                    trimEndSec = if (videoTrimEndSec <= 0f || videoTrimEndSec > clipDuration) clipDuration else videoTrimEndSec,
+                                    speedMultiplier = videoSpeedMultiplier,
+                                    isPlaying = isVideoPlaying,
+                                    onSeek = { pos ->
+                                        videoCurrentPositionSec = pos
+                                        playbackProgress = (pos / clipDuration).coerceIn(0f, 1f)
+                                    },
+                                    onTrimChange = { start, end ->
+                                        videoTrimStartSec = start
+                                        videoTrimEndSec = end
+                                    },
+                                    onSpeedChange = { spd ->
+                                        videoSpeedMultiplier = spd
+                                    },
+                                    onTogglePlay = {
+                                        isVideoPlaying = !isVideoPlaying
+                                    },
                                     modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    items(allFilters, key = { it.id }) { filter ->
-                                        val isSel = selectedFilter.id == filter.id
-                                        Surface(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .clickable { selectedFilter = filter },
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = if (isSel) BlinkPrimary else BlinkCardDark,
-                                            border = BorderStroke(1.dp, if (isSel) BlinkCyan else Color.White.copy(alpha = 0.15f))
-                                        ) {
-                                            Column(
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                                horizontalAlignment = Alignment.CenterHorizontally
-                                            ) {
-                                                Text(text = filter.iconEmoji, fontSize = 20.sp)
-                                                Text(
-                                                    text = filter.name,
-                                                    fontSize = 11.sp,
-                                                    color = Color.White,
-                                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
+                                )
                             }
 
-                            // 2. MUSIC: Audio track selector & search
-                            VideoEditTab.MUSIC -> {
-                                var postEditMusicSearch by remember { mutableStateOf("") }
-                                var postEditGenre by remember { mutableStateOf<String?>(null) }
-
-                                val displayedEditTracks = remember(postEditMusicSearch, postEditGenre) {
-                                    val q = postEditMusicSearch.trim().lowercase()
-                                    val all = BlinkMusicPlayer.availableTracks
-                                    all.filter { track ->
-                                        val matchQ = if (q.isBlank()) true else (
-                                            track.title.lowercase().contains(q) ||
-                                            track.artist.lowercase().contains(q) ||
-                                            track.genre.lowercase().contains(q)
-                                        )
-                                        val matchG = if (postEditGenre == null) true else (
-                                            track.genre.contains(postEditGenre!!, ignoreCase = true)
-                                        )
-                                        matchQ && matchG
-                                    }
-                                }
-
+                            // 1. FILTERS: Live filter applicator & shader tuning on photo/video
+                            VideoEditTab.FILTERS -> {
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -1604,81 +2072,48 @@ fun CameraScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = "🎵 Track: ${selectedMusicTrack.ifBlank { "None Selected" }}",
+                                            text = "Active: ${selectedFilter.name} ${selectedFilter.iconEmoji}",
                                             color = BlinkCyanLight,
                                             fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            modifier = Modifier.weight(1f)
+                                            fontWeight = FontWeight.Bold
                                         )
                                         Text(
-                                            text = if (isAudioMuted) "Audio Muted 🔇" else "Audio Playing 🔊",
-                                            color = if (isAudioMuted) BlinkPinkLight else BlinkCyanLight,
+                                            text = "⚙️ Tune Shader FX",
+                                            color = Color(0xFFFBBF24),
                                             fontSize = 11.sp,
-                                            modifier = Modifier.clickable { isAudioMuted = !isAudioMuted }
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.clickable { isShaderTweakSheetOpen = true }
                                         )
                                     }
 
-                                    // Quick Genre filter pills
-                                    val tabs = listOf("All", "Bongo", "Dramatic", "Funny", "EDM", "Lofi")
-                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        items(tabs) { tab ->
-                                            val isSel = (tab == "All" && postEditGenre == null) || (postEditGenre == tab)
+                                    LazyRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        items(allFilters, key = { it.id }) { filter ->
+                                            val isSel = selectedFilter.id == filter.id
                                             Surface(
                                                 modifier = Modifier
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable { postEditGenre = if (tab == "All") null else tab },
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = if (isSel) BlinkPrimary else BlinkCardDark,
-                                                border = BorderStroke(1.dp, if (isSel) BlinkCyan else Color.White.copy(alpha = 0.15f))
-                                            ) {
-                                                Text(
-                                                    text = when (tab) {
-                                                        "Bongo" -> "🌴 Bongo"
-                                                        "Dramatic" -> "🎭 Dramatic"
-                                                        "Funny" -> "🎪 Funny"
-                                                        "EDM" -> "⚡ EDM"
-                                                        "Lofi" -> "🌌 Lofi"
-                                                        else -> "All"
-                                                    },
-                                                    color = Color.White,
-                                                    fontSize = 10.sp,
-                                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    // Tracks list
-                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        items(displayedEditTracks) { track ->
-                                            val isSel = selectedMusicTrack == track.title
-                                            Surface(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .clip(RoundedCornerShape(12.dp))
                                                     .clickable {
-                                                        selectedMusicTrack = track.title
-                                                        cameraSelectedMusic = track.title
-                                                        isAudioMuted = false
-                                                        BlinkMusicPlayer.playTrack(track.title)
+                                                        selectedFilter = filter
+                                                        shaderIntensity = filter.defaultIntensity
+                                                        shaderScanlines = filter.scanlines
                                                     },
-                                                shape = RoundedCornerShape(10.dp),
+                                                shape = RoundedCornerShape(12.dp),
                                                 color = if (isSel) BlinkPrimary else BlinkCardDark,
                                                 border = BorderStroke(1.dp, if (isSel) BlinkCyan else Color.White.copy(alpha = 0.15f))
                                             ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                Column(
+                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                                    horizontalAlignment = Alignment.CenterHorizontally
                                                 ) {
-                                                    Text(track.iconEmoji, fontSize = 12.sp)
+                                                    Text(text = filter.iconEmoji, fontSize = 18.sp)
                                                     Text(
-                                                        text = track.title,
+                                                        text = filter.name,
+                                                        fontSize = 10.5.sp,
                                                         color = Color.White,
-                                                        fontSize = 11.sp,
-                                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                                        maxLines = 1
+                                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
                                                     )
                                                 }
                                             }
@@ -1687,14 +2122,38 @@ fun CameraScreen(
                                 }
                             }
 
-                            // 3. TEXT: Floating title overlay on video
+                            // 2. MUSIC: TikTok-Style Music Mixer (Trending Sounds + Equalizer Waveform + Dual Volume Sliders)
+                            VideoEditTab.MUSIC -> {
+                                TikTokMusicMixer(
+                                    selectedTrack = selectedMusicTrack.ifBlank { cameraSelectedMusic },
+                                    originalVolume = originalAudioVolume,
+                                    musicVolume = musicTrackVolume,
+                                    isVideoPlaying = isVideoPlaying,
+                                    onSelectSound = { sound ->
+                                        selectedMusicTrack = sound.title
+                                        cameraSelectedMusic = sound.title
+                                        isAudioMuted = false
+                                        BlinkMusicPlayer.playTrack(sound.title, sound.previewUrl, sound.artworkUrl)
+                                    },
+                                    onOriginalVolumeChange = { vol ->
+                                        originalAudioVolume = vol
+                                    },
+                                    onMusicVolumeChange = { vol ->
+                                        musicTrackVolume = vol
+                                        BlinkMusicPlayer.setMusicVolume(vol)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            // 3. TEXT: TikTok Styled Text Overlay with fonts, background pill/glow, and colors
                             VideoEditTab.TEXT -> {
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     OutlinedTextField(
                                         value = customVideoText,
                                         onValueChange = { customVideoText = it },
-                                        placeholder = { Text("Type text on video...", color = BlinkTextSecondary, fontSize = 12.sp) },
-                                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                                        placeholder = { Text("Type TikTok text overlay...", color = BlinkTextSecondary, fontSize = 12.sp) },
+                                        modifier = Modifier.fillMaxWidth().height(46.dp),
                                         shape = RoundedCornerShape(12.dp),
                                         colors = OutlinedTextFieldDefaults.colors(
                                             focusedTextColor = Color.White,
@@ -1706,41 +2165,219 @@ fun CameraScreen(
                                         ),
                                         singleLine = true
                                     )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        listOf(
-                                            Color.White to "White",
-                                            Color(0xFF06B6D4) to "Cyan",
-                                            Color(0xFFEC4899) to "Pink",
-                                            Color(0xFFFACC15) to "Gold",
-                                            Color(0xFF10B981) to "Green"
-                                        ).forEach { (color, _) ->
-                                            Box(
+
+                                    // TikTok Font Styles
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        items(listOf("Classic", "Typewriter", "Heavy Impact", "Neon Glow")) { style ->
+                                            val isSel = videoTextStyle == style
+                                            Surface(
                                                 modifier = Modifier
-                                                    .size(24.dp)
-                                                    .clip(CircleShape)
-                                                    .background(color)
-                                                    .clickable { videoTextColor = color }
-                                                    .border(if (videoTextColor == color) 2.dp else 0.dp, Color.White, CircleShape)
-                                            )
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .clickable { videoTextStyle = style },
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isSel) BlinkPrimary else BlinkCardDark,
+                                                border = BorderStroke(1.dp, if (isSel) BlinkCyan else Color.White.copy(alpha = 0.15f))
+                                            ) {
+                                                Text(
+                                                    text = style,
+                                                    color = Color.White,
+                                                    fontSize = 10.5.sp,
+                                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
                                         }
-                                        Spacer(modifier = Modifier.weight(1f))
-                                        Text(
-                                            text = "Style: $videoTextBgStyle",
-                                            color = BlinkCyanLight,
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.clickable {
-                                                videoTextBgStyle = when (videoTextBgStyle) {
-                                                    "glow" -> "pill"
-                                                    "pill" -> "none"
-                                                    else -> "glow"
+                                    }
+
+                                    // Color Swatches & Background Style
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            listOf(
+                                                Color.White to "White",
+                                                Color(0xFF06B6D4) to "Cyan",
+                                                Color(0xFFEC4899) to "Pink",
+                                                Color(0xFFFACC15) to "Gold",
+                                                Color(0xFF10B981) to "Green",
+                                                Color(0xFFA855F7) to "Purple"
+                                            ).forEach { (color, _) ->
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(22.dp)
+                                                        .clip(CircleShape)
+                                                        .background(color)
+                                                        .clickable { videoTextColor = color }
+                                                        .border(if (videoTextColor == color) 2.dp else 0.dp, Color.White, CircleShape)
+                                                )
+                                            }
+                                        }
+
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            listOf("glow" to "Glow ✨", "pill" to "Pill ⬛", "neon" to "Neon 🔮", "none" to "Raw").forEach { (bg, label) ->
+                                                val isSel = videoTextBgStyle == bg
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                        .clickable { videoTextBgStyle = bg },
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = if (isSel) BlinkPink.copy(alpha = 0.4f) else Color.Transparent,
+                                                    border = BorderStroke(1.dp, if (isSel) BlinkPink else Color.White.copy(alpha = 0.2f))
+                                                ) {
+                                                    Text(label, color = Color.White, fontSize = 9.5.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                                 }
                                             }
-                                        )
+                                        }
                                     }
                                 }
                             }
 
-                            // 4. STICKERS: Tap to add/remove
+                            // 4. DRAWINGS: Touch & sketch color/pen tools
+                            VideoEditTab.DRAWINGS -> {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "✏️ Touch preview above to draw (${drawnStrokes.size} strokes)",
+                                            color = BlinkCyanLight,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (drawnStrokes.isNotEmpty()) {
+                                            Text(
+                                                text = "Clear All 🗑️",
+                                                color = BlinkPinkLight,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.clickable { drawnStrokes.clear() }
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // Color Swatches
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            listOf(
+                                                Color.White to "White",
+                                                Color(0xFF06B6D4) to "Cyan",
+                                                Color(0xFFEC4899) to "Pink",
+                                                Color(0xFFFACC15) to "Gold",
+                                                Color(0xFF10B981) to "Green",
+                                                Color(0xFFA855F7) to "Purple",
+                                                Color(0xFFEF4444) to "Red"
+                                            ).forEach { (col, _) ->
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(24.dp)
+                                                        .clip(CircleShape)
+                                                        .background(col)
+                                                        .clickable { currentPenColor = col }
+                                                        .border(if (currentPenColor == col) 2.dp else 0.dp, Color.White, CircleShape)
+                                                )
+                                            }
+                                        }
+
+                                        // Pen Thickness
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            listOf(4f to "Thin", 8f to "Med", 16f to "Thick").forEach { (width, label) ->
+                                                val isSel = currentStrokeWidth == width
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .clickable { currentStrokeWidth = width },
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    color = if (isSel) BlinkPrimary else BlinkCardDark,
+                                                    border = BorderStroke(1.dp, if (isSel) BlinkCyan else Color.White.copy(alpha = 0.15f))
+                                                ) {
+                                                    Text(
+                                                        text = label,
+                                                        color = Color.White,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 5. FUNNY WRITING: Viral meme captions & funny quotes
+                            VideoEditTab.FUNNY_WRITING -> {
+                                val funnyQuotes = listOf(
+                                    "POV: You forgot your homework 💀",
+                                    "Main Character Energy ✨",
+                                    "My last 2 brain cells 🧠⚡",
+                                    "Living rent free in my head 🎪",
+                                    "Tell me without telling me 👀",
+                                    "It's giving iconic 💅",
+                                    "Send help immediately 😭",
+                                    "Certified classic 🏆",
+                                    "Zero thoughts, just vibes 🌮",
+                                    "No cap fr fr 🧢🚫"
+                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = if (activeFunnyWriting.isNotBlank()) "Badge: \"$activeFunnyWriting\"" else "Tap funny quote to overlay on media:",
+                                            color = BlinkCyanLight,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (activeFunnyWriting.isNotBlank()) {
+                                            Text(
+                                                text = "Remove ✖",
+                                                color = BlinkPinkLight,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.clickable { activeFunnyWriting = "" }
+                                            )
+                                        }
+                                    }
+
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        items(funnyQuotes) { quote ->
+                                            val isSel = activeFunnyWriting == quote
+                                            Surface(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .clickable {
+                                                        activeFunnyWriting = if (isSel) "" else quote
+                                                    },
+                                                shape = RoundedCornerShape(10.dp),
+                                                color = if (isSel) BlinkPrimary else BlinkCardDark,
+                                                border = BorderStroke(1.dp, if (isSel) BlinkCyan else Color.White.copy(alpha = 0.15f))
+                                            ) {
+                                                Text(
+                                                    text = quote,
+                                                    color = Color.White,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 6. STICKERS: Tap to add/remove
                             VideoEditTab.STICKERS -> {
                                 val stickerOptions = listOf("⚡", "🔥", "👑", "👽", "🍩", "💖", "🚀", "🤪", "🎮", "🌮", "🎈", "🐱", "🕶️", "💫")
                                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1794,11 +2431,81 @@ fun CameraScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Action Buttons (Post as Blink Video vs Post to Home Feed)
+                    // Action Buttons (Export to Device + Post as Blink Video / Story / Home Feed)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        // Export (MP4 Video / HD Photo) with dual audio mixing and filters
+                        Button(
+                            onClick = {
+                                isExporting = true
+                                exportProgress = 0f
+                                coroutineScope.launch {
+                                    if (isRecordedVideo) {
+                                        val res = MediaExportEngine.exportVideo(
+                                            context = context,
+                                            baseUri = capturedImageUri,
+                                            clipDurationSec = recordingSeconds.coerceAtLeast(3),
+                                            trimStartSec = videoTrimStartSec,
+                                            trimEndSec = if (videoTrimEndSec <= 0f) recordingSeconds.coerceAtLeast(3).toFloat() else videoTrimEndSec,
+                                            originalAudioVolume = originalAudioVolume,
+                                            musicVolume = musicTrackVolume,
+                                            selectedSoundtrack = selectedMusicTrack.ifBlank { cameraSelectedMusic },
+                                            filter = selectedFilter,
+                                            shaderIntensity = shaderIntensity,
+                                            textOverlay = customVideoText,
+                                            textColor = videoTextColor,
+                                            textStyle = videoTextStyle,
+                                            textBgStyle = videoTextBgStyle,
+                                            stickers = videoStickers.toList(),
+                                            onProgress = { p -> exportProgress = p }
+                                        )
+                                        isExporting = false
+                                        exportResult = res
+                                        showExportSuccessDialog = true
+                                    } else {
+                                        val res = MediaExportEngine.exportPhoto(
+                                            context = context,
+                                            baseUri = capturedImageUri,
+                                            filter = selectedFilter,
+                                            shaderIntensity = shaderIntensity,
+                                            textOverlay = customVideoText,
+                                            textColor = videoTextColor,
+                                            textStyle = videoTextStyle,
+                                            textBgStyle = videoTextBgStyle,
+                                            stickers = videoStickers.toList(),
+                                            strokes = drawnStrokes.toList(),
+                                            funnyWriting = activeFunnyWriting,
+                                            onProgress = { p -> exportProgress = p }
+                                        )
+                                        isExporting = false
+                                        exportResult = res
+                                        showExportSuccessDialog = true
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("export_media_button"),
+                            colors = ButtonDefaults.buttonColors(containerColor = BlinkCyan),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = "Export", tint = Color.Black, modifier = Modifier.size(16.dp))
+                                Text(
+                                    text = if (isRecordedVideo) "Export MP4" else "Save HD",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = Color.Black
+                                )
+                            }
+                        }
+
                         if (isRecordedVideo && onCreateVideo != null) {
                             Button(
                                 onClick = {
@@ -1822,8 +2529,30 @@ fun CameraScreen(
                                 colors = ButtonDefaults.buttonColors(containerColor = BlinkPink),
                                 shape = RoundedCornerShape(14.dp)
                             ) {
-                                Text("Post as Blink Video 🎬", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("Post Video 🎬", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                             }
+                        }
+
+                        Button(
+                            onClick = {
+                                onPostCreated(
+                                    snapCaption.ifBlank { if (isRecordedVideo) "Recorded Video on Blink 🎬⚡" else "New Blink Story 🌟" },
+                                    selectedFilter.name,
+                                    true,
+                                    capturedImageUri?.toString()
+                                )
+                                capturedSnapReady = false
+                                onCloseCamera()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("share_to_story_button"),
+                            colors = ButtonDefaults.buttonColors(containerColor = BlinkCardDark),
+                            border = BorderStroke(1.dp, BlinkCyanLight),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text("Story 🌟", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color.White)
                         }
 
                         Button(
@@ -1844,11 +2573,52 @@ fun CameraScreen(
                             colors = ButtonDefaults.buttonColors(containerColor = BlinkPrimary),
                             shape = RoundedCornerShape(14.dp)
                         ) {
-                            Text("Post to Home ⚡", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("Feed ⚡", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                         }
                     }
                 }
             }
+        }
+
+        // Export Progress Dialog (Hardware encoding & audio mixing visualizer)
+        if (isExporting) {
+            MediaExportProgressDialog(
+                progress = exportProgress,
+                isVideo = isRecordedVideo
+            )
+        }
+
+        // Export Success Dialog (Preview, File info & Direct Share Sheet trigger)
+        if (showExportSuccessDialog && exportResult != null) {
+            MediaExportSuccessDialog(
+                context = context,
+                result = exportResult!!,
+                onDismiss = {
+                    showExportSuccessDialog = false
+                },
+                onPostToStory = {
+                    onPostCreated(
+                        snapCaption.ifBlank { if (isRecordedVideo) "Recorded Video on Blink 🎬⚡" else "New Blink Story 🌟" },
+                        selectedFilter.name,
+                        true,
+                        exportResult?.uri?.toString()
+                    )
+                    showExportSuccessDialog = false
+                    capturedSnapReady = false
+                    onCloseCamera()
+                },
+                onPostToFeed = {
+                    onPostCreated(
+                        snapCaption.ifBlank { if (isRecordedVideo) "Recorded Video on Blink 🎬⚡" else "New Blink on Blinkchat ⚡" },
+                        selectedFilter.name,
+                        false,
+                        exportResult?.uri?.toString()
+                    )
+                    showExportSuccessDialog = false
+                    capturedSnapReady = false
+                    onCloseCamera()
+                }
+            )
         }
     }
 }

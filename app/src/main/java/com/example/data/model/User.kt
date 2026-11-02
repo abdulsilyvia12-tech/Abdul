@@ -24,5 +24,9 @@ data class User(
     val bannerTheme: String = "Synthwave Tokyo Night 🌆",
     val vipBadge: String = "⚡ VIP Creator",
     val profileLevel: Int = 5,
-    val profileXp: Int = 850
+    val profileXp: Int = 850,
+    val followersCount: Int = 384,
+    val followingCount: Int = 182,
+    val isVerified: Boolean = false,
+    val socialLinks: List<String> = listOf("instagram.com/blink", "tiktok.com/@blink", "youtube.com/@blink")
 )
