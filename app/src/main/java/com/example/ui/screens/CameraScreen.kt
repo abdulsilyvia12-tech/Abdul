@@ -216,6 +216,7 @@ fun CameraScreen(
 
     // Camera Mode (Photo vs Video)
     var isVideoMode by remember { mutableStateOf(false) }
+    var isPureCameraXMode by remember { mutableStateOf(false) }
     var isRecording by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableStateOf(0) }
     var isFrontCamera by remember { mutableStateOf(false) }
@@ -229,6 +230,23 @@ fun CameraScreen(
     var isRecordedVideo by remember { mutableStateOf(false) }
     var capturedImageUri by remember { mutableStateOf<Uri?>(null) }
     var capturedSnapReady by remember { mutableStateOf(false) }
+
+    if (isPureCameraXMode) {
+        CameraXPreviewCapture(
+            onPhotoCaptured = { uri ->
+                capturedImageUri = uri
+                isRecordedVideo = false
+                capturedSnapReady = true
+                isPureCameraXMode = false
+            },
+            onClose = {
+                isPureCameraXMode = false
+            },
+            title = "Snap Photo (CameraX)",
+            showReviewStep = true
+        )
+        return
+    }
     var snapCaption by remember { mutableStateOf("") }
     var aiSuggestions by remember { mutableStateOf<List<String>>(emptyList()) }
     var isLoadingAi by remember { mutableStateOf(false) }
@@ -1436,7 +1454,6 @@ fun CameraScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Mode Selector: Photo vs Video
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
@@ -1454,6 +1471,15 @@ fun CameraScreen(
                     modifier = Modifier
                         .clickable { isVideoMode = false }
                         .testTag("mode_photo")
+                )
+                Text(
+                    text = "SNAP (CAMERAX) 📸",
+                    color = BlinkCyanLight,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .clickable { isPureCameraXMode = true }
+                        .testTag("mode_camerax_snap")
                 )
                 Text(
                     text = "VIDEO 🎬",

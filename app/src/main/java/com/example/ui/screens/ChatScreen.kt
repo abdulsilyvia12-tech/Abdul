@@ -1,8 +1,12 @@
 package com.example.ui.screens
 
 import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,10 +29,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -36,7 +42,10 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.ai.BlinkAiService
 import com.example.data.ai.ChatSummaryResult
@@ -45,6 +54,7 @@ import com.example.data.model.Conversation
 import com.example.data.model.User
 import com.example.data.repository.BlinkRepository
 import com.example.ui.components.AvatarBadge
+import com.example.ui.components.camera.CameraXPreviewCapture
 import com.example.ui.theme.*
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -79,14 +89,14 @@ fun ChatScreen(
     val firestore = remember {
         repository?.firestore ?: try {
             val dbId = context.getString(R.string.firestore_database_id)
-            if (dbId.isNotBlank()) FirebaseFirestore.getInstance(dbId)
-            else FirebaseFirestore.getInstance()
-        } catch (e: Exception) {
-            try {
-                FirebaseFirestore.getInstance()
-            } catch (e2: Exception) {
+            if (dbId.isNotBlank()) {
+                FirebaseFirestore.getInstance(dbId)
+            } else {
                 null
             }
+        } catch (e: Exception) {
+            Log.w("ChatScreen", "Failed to get Firestore instance with databaseId: ${e.message}")
+            null
         }
     }
 
@@ -103,11 +113,126 @@ fun ChatScreen(
     var inputText by remember { mutableStateOf("") }
     var isBlinkMode by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
+    var isCameraSnapOpen by remember { mutableStateOf(false) }
+    var selectedMediaForFullscreen by remember { mutableStateOf<ChatMessage?>(null) }
+
+    // Visual media picker from device
+    val galleryPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val msgId = "m_" + UUID.randomUUID().toString().take(8)
+            val curUserId = currentUser?.id ?: "user_me"
+            val curUserName = currentUser?.displayName ?: "Alex Rivers"
+            val now = System.currentTimeMillis()
+            val formattedTimeStr = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(now))
+
+            val mimeType = context.contentResolver.getType(uri) ?: ""
+            val isVideo = mimeType.startsWith("video") || uri.toString().contains("video") || uri.toString().endsWith(".mp4")
+            val mediaType = if (isVideo) "video" else "image"
+            val defaultText = if (isVideo) {
+                if (isBlinkMode) "⚡ Disappearing Video Snap" else "🎬 Shared Video"
+            } else {
+                if (isBlinkMode) "⚡ Disappearing Snap Photo" else "📸 Shared Photo"
+            }
+
+            repository?.sendMessage(
+                conversationId = conversationId,
+                text = defaultText,
+                isBlink = isBlinkMode,
+                mediaType = mediaType,
+                mediaUri = uri.toString()
+            )
+
+            try {
+                if (firestore != null) {
+                    val messagePayload = hashMapOf(
+                        "id" to msgId,
+                        "conversationId" to conversationId,
+                        "senderId" to curUserId,
+                        "senderName" to curUserName,
+                        "text" to defaultText,
+                        "mediaUri" to uri.toString(),
+                        "mediaType" to mediaType,
+                        "isBlink" to isBlinkMode,
+                        "blinkSecondsRemaining" to (if (isBlinkMode) (if (isVideo) 15 else 10) else 0),
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "timestamp" to now,
+                        "timeFormatted" to formattedTimeStr
+                    )
+                    firestore.collection("messages").document(msgId).set(messagePayload)
+                }
+            } catch (e: Exception) {
+                Log.w("ChatScreen", "Failed to send gallery media to Firestore: ${e.message}")
+            }
+        }
+    }
 
     // AI summary state
     var showAiSummarySheet by remember { mutableStateOf(false) }
     var isSummarizing by remember { mutableStateOf(false) }
     var chatSummary by remember { mutableStateOf<ChatSummaryResult?>(null) }
+
+    // Fullscreen CameraX Preview & Media Capture (Photo & Video) overlay for Chat
+    if (isCameraSnapOpen) {
+        CameraXPreviewCapture(
+            onMediaCaptured = { uri, mediaType ->
+                isCameraSnapOpen = false
+                val msgId = "m_" + UUID.randomUUID().toString().take(8)
+                val curUserId = currentUser?.id ?: "user_me"
+                val curUserName = currentUser?.displayName ?: "Alex Rivers"
+                val now = System.currentTimeMillis()
+                val formattedTimeStr = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(now))
+
+                val isVideo = (mediaType == "video")
+                val defaultText = if (isVideo) {
+                    if (isBlinkMode) "⚡ Disappearing Video Snap" else "🎬 Video Snap"
+                } else {
+                    if (isBlinkMode) "⚡ Disappearing Snap Photo" else "📸 Photo Snap"
+                }
+
+                repository?.sendMessage(
+                    conversationId = conversationId,
+                    text = defaultText,
+                    isBlink = isBlinkMode,
+                    mediaType = mediaType,
+                    mediaUri = uri.toString()
+                )
+
+                try {
+                    if (firestore != null) {
+                        val messagePayload = hashMapOf(
+                            "id" to msgId,
+                            "conversationId" to conversationId,
+                            "senderId" to curUserId,
+                            "senderName" to curUserName,
+                            "text" to defaultText,
+                            "mediaUri" to uri.toString(),
+                            "mediaType" to mediaType,
+                            "isBlink" to isBlinkMode,
+                            "blinkSecondsRemaining" to (if (isBlinkMode) (if (isVideo) 15 else 10) else 0),
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "timestamp" to now,
+                            "timeFormatted" to formattedTimeStr
+                        )
+                        firestore.collection("messages").document(msgId).set(messagePayload)
+                            .addOnSuccessListener {
+                                isFirestoreConnected = true
+                            }
+                            .addOnFailureListener { e ->
+                                Log.w("ChatScreen", "Firestore media write failed: ${e.message}")
+                            }
+                    }
+                } catch (e: Exception) {
+                    Log.w("ChatScreen", "Failed to send media to Firestore: ${e.message}")
+                }
+            },
+            onClose = { isCameraSnapOpen = false },
+            title = "CameraX Snap (Photo/Video)",
+            showReviewStep = true
+        )
+        return
+    }
 
     // Real-time Firestore Snapshot Listener
     DisposableEffect(conversationId, firestore) {
@@ -458,7 +583,11 @@ fun ChatScreen(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
                                     .clickable {
-                                        inputText = prompt
+                                        if (prompt.contains("Send a snap")) {
+                                            isCameraSnapOpen = true
+                                        } else {
+                                            inputText = prompt
+                                        }
                                     },
                                 color = BlinkPrimary.copy(alpha = 0.12f),
                                 shape = RoundedCornerShape(12.dp)
@@ -501,6 +630,48 @@ fun ChatScreen(
                             contentDescription = "Toggle Blink",
                             tint = if (isBlinkMode) BlinkPink else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Camera Snap button (CameraX Preview & Snap)
+                    IconButton(
+                        onClick = { isCameraSnapOpen = true },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .testTag("chat_camera_snap_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CameraAlt,
+                            contentDescription = "Snap Photo or Video",
+                            tint = BlinkCyanLight,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Gallery Picker button (Pick Photo or Video)
+                    IconButton(
+                        onClick = {
+                            galleryPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                            )
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .testTag("chat_gallery_media_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AddPhotoAlternate,
+                            contentDescription = "Pick Media from Gallery",
+                            tint = BlinkPrimaryLight,
+                            modifier = Modifier.size(19.dp)
                         )
                     }
 
@@ -702,7 +873,10 @@ fun ChatScreen(
                         ChatMessageBubble(
                             message = message,
                             recipientAvatarColor = recipientAvatarColorHex,
-                            recipientName = conversationTitle
+                            recipientName = conversationTitle,
+                            onMediaClick = { clickedMsg ->
+                                selectedMediaForFullscreen = clickedMsg
+                            }
                         )
                     }
                 }
@@ -800,6 +974,14 @@ fun ChatScreen(
             }
         }
     }
+
+    // Fullscreen Media Viewer Dialog (Photos and Videos from Firestore / CameraX)
+    if (selectedMediaForFullscreen != null) {
+        FullscreenChatMediaDialog(
+            message = selectedMediaForFullscreen!!,
+            onDismiss = { selectedMediaForFullscreen = null }
+        )
+    }
 }
 
 /**
@@ -828,13 +1010,15 @@ fun ChatScreen(
 }
 
 /**
- * Message bubble item rendering distinct styles for outgoing (from me) vs incoming messages.
+ * Message bubble item rendering distinct styles for outgoing (from me) vs incoming messages,
+ * supporting text, photos, and video attachments stored in Cloud Firestore.
  */
 @Composable
 fun ChatMessageBubble(
     message: ChatMessage,
     recipientAvatarColor: String,
     recipientName: String,
+    onMediaClick: ((ChatMessage) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isFromMe = message.isFromMe
@@ -898,13 +1082,16 @@ fun ChatMessageBubble(
                     )
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
+                    modifier = Modifier.padding(
+                        horizontal = if (!message.mediaUri.isNullOrBlank()) 6.dp else 14.dp,
+                        vertical = if (!message.mediaUri.isNullOrBlank()) 6.dp else 9.dp
+                    )
                 ) {
                     // Ephemeral Blink Header
                     if (message.isBlink) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(bottom = 4.dp)
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.HourglassTop,
@@ -914,7 +1101,7 @@ fun ChatMessageBubble(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "Blink (10s)",
+                                text = "Blink Disappearing Media",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (isFromMe) Color.White.copy(alpha = 0.9f) else BlinkPink
@@ -928,20 +1115,127 @@ fun ChatMessageBubble(
                             text = message.senderName,
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.sp,
-                            color = BlinkCyanLight
+                            color = BlinkCyanLight,
+                            modifier = Modifier.padding(horizontal = 6.dp)
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                     }
 
-                    // Message text body
-                    Text(
-                        text = message.text,
-                        color = if (isFromMe) Color.White else MaterialTheme.colorScheme.onSurface,
-                        fontSize = 14.sp,
-                        lineHeight = 19.sp
-                    )
+                    // Photo or Video Media Attachment from CameraX / Firestore
+                    if (!message.mediaUri.isNullOrBlank()) {
+                        val isVideo = message.mediaType.equals("video", ignoreCase = true)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 140.dp, max = 220.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.Black.copy(alpha = 0.25f))
+                                .clickable { onMediaClick?.invoke(message) }
+                                .padding(bottom = 4.dp)
+                        ) {
+                            AsyncImage(
+                                model = message.mediaUri,
+                                contentDescription = if (isVideo) "Video clip" else "Photo snap",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(200.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .testTag(if (isVideo) "chat_message_video_${message.id}" else "chat_message_photo_${message.id}")
+                            )
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                            // Video Overlay: Play button in center
+                            if (isVideo) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black.copy(alpha = 0.3f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Surface(
+                                        modifier = Modifier.size(48.dp),
+                                        shape = CircleShape,
+                                        color = Color.Black.copy(alpha = 0.65f),
+                                        border = BorderStroke(1.5.dp, BlinkCyanLight)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Default.PlayArrow,
+                                                contentDescription = "Play Video",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(30.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Video tag in top-left
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = BlinkPink.copy(alpha = 0.85f),
+                                    modifier = Modifier
+                                        .align(Alignment.TopStart)
+                                        .padding(8.dp)
+                                ) {
+                                    Text(
+                                        text = "🎬 VIDEO",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                    )
+                                }
+                            } else {
+                                // Photo tag in top-left
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = BlinkPrimary.copy(alpha = 0.85f),
+                                    modifier = Modifier
+                                        .align(Alignment.TopStart)
+                                        .padding(8.dp)
+                                ) {
+                                    Text(
+                                        text = "📸 PHOTO",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            // Fullscreen icon in bottom-right
+                            Surface(
+                                shape = CircleShape,
+                                color = Color.Black.copy(alpha = 0.6f),
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(8.dp)
+                                    .size(26.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Fullscreen,
+                                        contentDescription = "View Fullscreen",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Message text caption body
+                    if (message.text.isNotBlank()) {
+                        Text(
+                            text = message.text,
+                            color = if (isFromMe) Color.White else MaterialTheme.colorScheme.onSurface,
+                            fontSize = 14.sp,
+                            lineHeight = 19.sp,
+                            modifier = Modifier.padding(horizontal = if (!message.mediaUri.isNullOrBlank()) 6.dp else 0.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
 
                     // Explicit time in message
                     val displayTime = remember(message.timestamp, message.timeFormatted) {
@@ -958,6 +1252,7 @@ fun ChatMessageBubble(
                     Row(
                         modifier = Modifier
                             .align(Alignment.End)
+                            .padding(horizontal = if (!message.mediaUri.isNullOrBlank()) 6.dp else 0.dp)
                             .testTag("chat_message_time_container_${message.id}"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -985,6 +1280,135 @@ fun ChatMessageBubble(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Fullscreen viewer dialog for photos and videos shared in Chat.
+ */
+@Composable
+fun FullscreenChatMediaDialog(
+    message: ChatMessage,
+    onDismiss: () -> Unit
+) {
+    var isVideoPlaying by remember { mutableStateOf(true) }
+    val isVideo = message.mediaType.equals("video", ignoreCase = true)
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .testTag("fullscreen_chat_media_dialog")
+        ) {
+            // Main Media Content (Photo or Video)
+            AsyncImage(
+                model = message.mediaUri,
+                contentDescription = if (isVideo) "Fullscreen Video" else "Fullscreen Photo",
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable {
+                        if (isVideo) isVideoPlaying = !isVideoPlaying
+                    },
+                contentScale = ContentScale.Fit
+            )
+
+            // Video Play / Pause Center Overlay
+            if (isVideo) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    IconButton(
+                        onClick = { isVideoPlaying = !isVideoPlaying },
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.6f))
+                            .border(2.dp, BlinkCyanLight, CircleShape)
+                            .testTag("fullscreen_video_play_toggle")
+                    ) {
+                        Icon(
+                            imageVector = if (isVideoPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isVideoPlaying) "Pause" else "Play",
+                            tint = Color.White,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+                }
+            }
+
+            // Top Header Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .testTag("fullscreen_media_close_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color.White
+                    )
+                }
+
+                Surface(
+                    color = Color.Black.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+                ) {
+                    Text(
+                        text = if (isVideo) "🎬 Video Snap" else "📸 Photo Snap",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.size(44.dp))
+            }
+
+            // Bottom Caption Bar
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(16.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.75f),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = message.text,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "${if (message.isFromMe) "You" else message.senderName} • ${message.timeFormatted}",
+                        color = BlinkTextSecondary,
+                        fontSize = 11.sp
+                    )
                 }
             }
         }

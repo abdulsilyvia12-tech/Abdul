@@ -38,15 +38,11 @@ class BlinkRepository(private val context: Context? = null) {
             if (!dbId.isNullOrBlank()) {
                 FirebaseFirestore.getInstance(dbId)
             } else {
-                FirebaseFirestore.getInstance()
+                null
             }
         } catch (e: Exception) {
             Log.w("BlinkRepo", "Firestore custom db initialization: ${e.message}")
-            try {
-                FirebaseFirestore.getInstance()
-            } catch (e2: Exception) {
-                null
-            }
+            null
         }
     }
 
