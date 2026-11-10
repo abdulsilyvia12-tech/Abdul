@@ -44,5 +44,10 @@ service cloud.firestore {
     match /friend_requests/{requestId} {
       allow read, write: if true;
     }
+
+    // Real-time typing indicators
+    match /typing_indicators/{indicatorId} {
+      allow read, write: if true;
+    }
   }
 }

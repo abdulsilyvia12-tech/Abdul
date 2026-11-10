@@ -11,11 +11,13 @@ data class ChatMessage(
     val timeFormatted: String = "12:00 PM",
     val isBlink: Boolean = false, // disappearing message
     val blinkSecondsRemaining: Int = 10,
-    val isRead: Boolean = true,
+    val isRead: Boolean = false,
     val isExpired: Boolean = false,
     val isFromMe: Boolean = false,
     val senderName: String = "",
-    val reaction: String? = null
+    val reaction: String? = null,
+    val reactions: Map<String, List<String>> = emptyMap(),
+    val readAt: Long? = null
 )
 
 data class Conversation(

@@ -2350,7 +2350,9 @@ class BlinkRepository(private val context: Context? = null) {
             timeFormatted = timeFormatted,
             isBlink = isBlink,
             blinkSecondsRemaining = if (isBlink) 10 else 0,
-            isFromMe = true
+            isFromMe = true,
+            isRead = false,
+            readAt = null
         )
 
         _messages.update { map ->
@@ -2393,7 +2395,9 @@ class BlinkRepository(private val context: Context? = null) {
                     "blinkSecondsRemaining" to (if (isBlink) 10 else 0),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "timestamp" to now,
-                    "timeFormatted" to timeFormatted
+                    "timeFormatted" to timeFormatted,
+                    "readAt" to null,
+                    "isRead" to false
                 )
                 db.collection("messages").document(msgId).set(messageMap)
                     .addOnFailureListener { e ->
@@ -2404,10 +2408,44 @@ class BlinkRepository(private val context: Context? = null) {
             Log.w("BlinkRepo", "Firestore sendMessage exception: ${e.message}")
         }
 
-        // If message is to Blink AI, generate smart response!
+        // If message is to Blink AI, generate smart response with real-time typing indicator synced to Firestore!
         val conv = _conversations.value.find { it.id == conversationId }
         if (conv?.isAiBot == true) {
             scope.launch {
+                val db = firestoreDb
+                val aiId = "user_ai"
+                val typingDocId = "${conversationId}_$aiId"
+
+                // 1. Mark user's message as read by Blink AI
+                try {
+                    db?.collection("messages")?.document(msgId)?.update(
+                        mapOf(
+                            "readAt" to FieldValue.serverTimestamp(),
+                            "isRead" to true
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.w("BlinkRepo", "AI readAt update failed: ${e.message}")
+                }
+
+                // 2. Sync typing status: start typing in Firestore
+                try {
+                    db?.collection("typing_indicators")?.document(typingDocId)?.set(
+                        hashMapOf(
+                            "conversationId" to conversationId,
+                            "userId" to aiId,
+                            "userName" to (conv.name.ifBlank { "Blink AI" }),
+                            "isTyping" to true,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.w("BlinkRepo", "Failed to start AI typing: ${e.message}")
+                }
+
+                // Realistic typing delay
+                delay(1600)
+
                 val currentHistory = (_messages.value[conversationId] ?: emptyList()).map { 
                     it.text to it.isFromMe 
                 }
@@ -2417,7 +2455,7 @@ class BlinkRepository(private val context: Context? = null) {
                 val aiMsg = ChatMessage(
                     id = "m_ai_" + UUID.randomUUID().toString().take(8),
                     conversationId = conversationId,
-                    senderId = "user_ai",
+                    senderId = aiId,
                     text = aiReply,
                     timestamp = nowAi,
                     timeFormatted = aiTime,
@@ -2433,6 +2471,21 @@ class BlinkRepository(private val context: Context? = null) {
                             c.copy(lastMessage = aiReply.take(40) + "...", lastMessageTime = aiTime)
                         } else c
                     }
+                }
+
+                // 2. Sync typing status: stop typing in Firestore
+                try {
+                    db?.collection("typing_indicators")?.document(typingDocId)?.set(
+                        hashMapOf(
+                            "conversationId" to conversationId,
+                            "userId" to aiId,
+                            "userName" to (conv.name.ifBlank { "Blink AI" }),
+                            "isTyping" to false,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.w("BlinkRepo", "Failed to stop AI typing: ${e.message}")
                 }
             }
         }
@@ -2468,6 +2521,22 @@ class BlinkRepository(private val context: Context? = null) {
                             val ts = doc.getTimestamp("createdAt")?.toDate()?.time
                                 ?: doc.getLong("timestamp")
                                 ?: System.currentTimeMillis()
+                            val reactionStr = doc.getString("reaction")
+                            val reactionsRaw = doc.get("reactions") as? Map<*, *>
+                            val parsedReactions: Map<String, List<String>> = if (reactionsRaw != null) {
+                                reactionsRaw.mapNotNull { (k, v) ->
+                                    val emojiKey = k as? String ?: return@mapNotNull null
+                                    val usersList = (v as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                                    if (usersList.isNotEmpty()) emojiKey to usersList else null
+                                }.toMap()
+                            } else if (!reactionStr.isNullOrBlank()) {
+                                mapOf(reactionStr to listOf(senderId))
+                            } else {
+                                emptyMap()
+                            }
+                            val readAtTs = doc.getTimestamp("readAt")?.toDate()?.time
+                                ?: doc.getLong("readAt")
+                            val isRead = (readAtTs != null) || (doc.getBoolean("isRead") ?: false)
                             ChatMessage(
                                 id = id,
                                 conversationId = conversationId,
@@ -2479,7 +2548,11 @@ class BlinkRepository(private val context: Context? = null) {
                                 timeFormatted = formatTime(ts),
                                 isBlink = isBlink,
                                 blinkSecondsRemaining = blinkSeconds,
-                                isFromMe = (senderId == curUserId)
+                                isFromMe = (senderId == curUserId),
+                                isRead = isRead,
+                                readAt = readAtTs,
+                                reaction = reactionStr ?: parsedReactions.keys.firstOrNull(),
+                                reactions = parsedReactions
                             )
                         }.sortedBy { it.timestamp }
 
@@ -2497,6 +2570,104 @@ class BlinkRepository(private val context: Context? = null) {
         } catch (e: Exception) {
             Log.w("BlinkRepo", "Failed to register observeFirestoreMessages: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Marks all unread messages from other participants as read with a readAt timestamp in Firestore.
+     */
+    fun markConversationAsRead(
+        conversationId: String,
+        currentUserId: String = _currentUser.value?.id ?: "user_me"
+    ) {
+        val db = firestoreDb ?: return
+        try {
+            db.collection("messages")
+                .whereEqualTo("conversationId", conversationId)
+                .get()
+                .addOnSuccessListener { snapshot ->
+                    val unreadDocs = snapshot.documents.filter { doc ->
+                        val sId = doc.getString("senderId") ?: ""
+                        sId.isNotBlank() && sId != currentUserId && doc.get("readAt") == null
+                    }
+                    if (unreadDocs.isNotEmpty()) {
+                        val batch = db.batch()
+                        for (doc in unreadDocs) {
+                            batch.update(doc.reference, mapOf(
+                                "readAt" to FieldValue.serverTimestamp(),
+                                "isRead" to true
+                            ))
+                        }
+                        batch.commit().addOnFailureListener { e ->
+                            Log.w("BlinkRepo", "markConversationAsRead batch commit error: ${e.message}")
+                        }
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Log.w("BlinkRepo", "markConversationAsRead get error: ${e.message}")
+                }
+        } catch (e: Exception) {
+            Log.w("BlinkRepo", "markConversationAsRead exception: ${e.message}")
+        }
+    }
+
+    /**
+     * Toggles an emoji reaction on a message in real-time, syncing to Cloud Firestore
+     * and optimistically updating local message state.
+     */
+    fun toggleMessageReaction(
+        conversationId: String,
+        messageId: String,
+        emoji: String,
+        userId: String = _currentUser.value?.id ?: "user_me"
+    ) {
+        var updatedReactionsMap: Map<String, List<String>> = emptyMap()
+        var updatedPrimaryReaction: String? = null
+
+        _messages.update { map ->
+            val list = map[conversationId] ?: emptyList()
+            val updatedList = list.map { msg ->
+                if (msg.id == messageId) {
+                    val currentUsers = msg.reactions[emoji] ?: emptyList()
+                    val newUsers = if (currentUsers.contains(userId)) {
+                        currentUsers - userId
+                    } else {
+                        currentUsers + userId
+                    }
+                    val newReactions = if (newUsers.isEmpty()) {
+                        msg.reactions - emoji
+                    } else {
+                        msg.reactions + (emoji to newUsers)
+                    }
+                    updatedReactionsMap = newReactions
+                    updatedPrimaryReaction = newReactions.keys.firstOrNull()
+                    msg.copy(
+                        reactions = newReactions,
+                        reaction = updatedPrimaryReaction
+                    )
+                } else {
+                    msg
+                }
+            }
+            map + (conversationId to updatedList)
+        }
+
+        // Sync to Firestore messages collection
+        try {
+            val db = firestoreDb
+            if (db != null) {
+                db.collection("messages").document(messageId).set(
+                    mapOf(
+                        "reactions" to updatedReactionsMap,
+                        "reaction" to updatedPrimaryReaction
+                    ),
+                    com.google.firebase.firestore.SetOptions.merge()
+                ).addOnFailureListener { e ->
+                    Log.w("BlinkRepo", "Failed to sync reaction to Firestore: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("BlinkRepo", "Firestore toggle reaction error: ${e.message}")
         }
     }
 

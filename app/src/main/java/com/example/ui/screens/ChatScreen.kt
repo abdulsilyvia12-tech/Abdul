@@ -1,16 +1,28 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import com.example.util.AudioPlayerManager
+import com.example.util.FirebaseStorageAudioUploader
+import com.example.util.VoiceRecorderManager
+import java.io.File
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -59,6 +71,8 @@ import com.example.ui.theme.*
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -115,6 +129,118 @@ fun ChatScreen(
     var isSending by remember { mutableStateOf(false) }
     var isCameraSnapOpen by remember { mutableStateOf(false) }
     var selectedMediaForFullscreen by remember { mutableStateOf<ChatMessage?>(null) }
+    var selectedMessageForReaction by remember { mutableStateOf<ChatMessage?>(null) }
+
+    // Voice audio recording & playback managers
+    val voiceRecorderManager = remember { VoiceRecorderManager(context) }
+    val audioPlayerManager = remember { AudioPlayerManager(context) }
+    var isVoiceRecording by remember { mutableStateOf(false) }
+    var voiceRecordingTicks by remember { mutableIntStateOf(0) }
+    var voiceAmplitude by remember { mutableIntStateOf(0) }
+
+    // Audio playback state
+    var playingAudioMessageId by remember { mutableStateOf<String?>(null) }
+    var audioPlaybackProgress by remember { mutableFloatStateOf(0f) }
+    var audioCurrentPositionMs by remember { mutableIntStateOf(0) }
+
+    // Clean up audio hardware on dispose
+    DisposableEffect(Unit) {
+        onDispose {
+            voiceRecorderManager.cancelRecording()
+            audioPlayerManager.stop()
+        }
+    }
+
+    // Timer & amplitude meter loop
+    LaunchedEffect(isVoiceRecording) {
+        if (isVoiceRecording) {
+            voiceRecordingTicks = 0
+            while (isVoiceRecording) {
+                delay(200)
+                if (isVoiceRecording) {
+                    voiceAmplitude = voiceRecorderManager.getMaxAmplitude()
+                    voiceRecordingTicks++
+                }
+            }
+        } else {
+            voiceRecordingTicks = 0
+            voiceAmplitude = 0
+        }
+    }
+
+    // Audio playback polling
+    LaunchedEffect(playingAudioMessageId) {
+        if (playingAudioMessageId != null) {
+            while (playingAudioMessageId != null && audioPlayerManager.isPlaying) {
+                val cur = audioPlayerManager.currentPosition
+                val dur = audioPlayerManager.duration
+                audioCurrentPositionMs = cur
+                if (dur > 0) {
+                    audioPlaybackProgress = (cur.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+                }
+                delay(100)
+            }
+            if (!audioPlayerManager.isPlaying) {
+                playingAudioMessageId = null
+                audioPlaybackProgress = 0f
+                audioCurrentPositionMs = 0
+            }
+        }
+    }
+
+    // Real-time typing indicators synced with Cloud Firestore
+    var typingUsers by remember { mutableStateOf<List<String>>(emptyList()) }
+    val isOtherParticipantTyping = typingUsers.isNotEmpty()
+    val typingDisplayName = remember(typingUsers, recipientUsername, conversationTitle) {
+        when {
+            typingUsers.isEmpty() -> recipientUsername
+            typingUsers.size == 1 -> typingUsers.first()
+            typingUsers.size == 2 -> "${typingUsers[0]} & ${typingUsers[1]}"
+            else -> "${typingUsers.first()} & ${typingUsers.size - 1} others"
+        }
+    }
+
+    // Sync local user typing status to Firestore
+    LaunchedEffect(inputText, conversationId) {
+        val curUserId = currentUser?.id ?: "user_me"
+        val curUserName = currentUser?.displayName ?: "Alex Rivers"
+        val indicatorDocId = "${conversationId}_${curUserId}"
+
+        if (firestore != null) {
+            val isTypingNow = inputText.trim().isNotEmpty()
+            try {
+                firestore.collection("typing_indicators").document(indicatorDocId).set(
+                    hashMapOf(
+                        "conversationId" to conversationId,
+                        "userId" to curUserId,
+                        "userName" to curUserName,
+                        "isTyping" to isTypingNow,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                )
+            } catch (e: Exception) {
+                Log.w("ChatScreen", "Failed to update typing status in Firestore: ${e.message}")
+            }
+
+            if (isTypingNow) {
+                // Auto-clear typing status after 3.5 seconds of user idle
+                delay(3500)
+                try {
+                    firestore.collection("typing_indicators").document(indicatorDocId).set(
+                        hashMapOf(
+                            "conversationId" to conversationId,
+                            "userId" to curUserId,
+                            "userName" to curUserName,
+                            "isTyping" to false,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
+        }
+    }
 
     // Visual media picker from device
     val galleryPickerLauncher = rememberLauncherForActivityResult(
@@ -234,9 +360,13 @@ fun ChatScreen(
         return
     }
 
-    // Real-time Firestore Snapshot Listener
+    // Real-time Firestore Snapshot Listeners (Messages & Typing Indicators)
     DisposableEffect(conversationId, firestore) {
         var listenerRegistration: ListenerRegistration? = null
+        var typingListenerRegistration: ListenerRegistration? = null
+        val curUserId = currentUser?.id ?: "user_me"
+        val indicatorDocId = "${conversationId}_${curUserId}"
+
         if (firestore != null) {
             try {
                 listenerRegistration = firestore.collection("messages")
@@ -249,7 +379,6 @@ fun ChatScreen(
                             return@addSnapshotListener
                         }
                         if (snapshot != null) {
-                            val curUserId = currentUser?.id ?: "user_me"
                             val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
                             val items = snapshot.documents.mapNotNull { doc ->
                                 val id = doc.getString("id") ?: doc.id
@@ -262,6 +391,19 @@ fun ChatScreen(
                                 val ts = doc.getTimestamp("createdAt")?.toDate()?.time
                                     ?: doc.getLong("timestamp")
                                     ?: System.currentTimeMillis()
+                                val reactionStr = doc.getString("reaction")
+                                val reactionsRaw = doc.get("reactions") as? Map<*, *>
+                                val parsedReactions: Map<String, List<String>> = if (reactionsRaw != null) {
+                                    reactionsRaw.mapNotNull { (k, v) ->
+                                        val emojiKey = k as? String ?: return@mapNotNull null
+                                        val usersList = (v as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                                        if (usersList.isNotEmpty()) emojiKey to usersList else null
+                                    }.toMap()
+                                } else if (!reactionStr.isNullOrBlank()) {
+                                    mapOf(reactionStr to listOf(senderId))
+                                } else {
+                                    emptyMap()
+                                }
                                 ChatMessage(
                                     id = id,
                                     conversationId = conversationId,
@@ -273,7 +415,9 @@ fun ChatScreen(
                                     timeFormatted = timeFormat.format(Date(ts)),
                                     isBlink = isBlink,
                                     blinkSecondsRemaining = blinkSeconds,
-                                    isFromMe = (senderId == curUserId)
+                                    isFromMe = (senderId == curUserId),
+                                    reaction = reactionStr ?: parsedReactions.keys.firstOrNull(),
+                                    reactions = parsedReactions
                                 )
                             }.sortedBy { it.timestamp }
 
@@ -285,10 +429,58 @@ fun ChatScreen(
             } catch (e: Exception) {
                 Log.w("ChatScreen", "Failed to attach snapshot listener: ${e.message}")
             }
+
+            // Real-time typing indicators listener
+            try {
+                typingListenerRegistration = firestore.collection("typing_indicators")
+                    .whereEqualTo("conversationId", conversationId)
+                    .whereEqualTo("isTyping", true)
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null) {
+                            Log.w("ChatScreen", "Typing listener error: ${error.message}")
+                            return@addSnapshotListener
+                        }
+                        if (snapshot != null) {
+                            val now = System.currentTimeMillis()
+                            val typers = snapshot.documents.mapNotNull { doc ->
+                                val uId = doc.getString("userId") ?: ""
+                                val isTyping = doc.getBoolean("isTyping") ?: false
+                                val updatedAt = doc.getLong("updatedAt") ?: 0L
+                                val name = doc.getString("userName") ?: recipientUsername
+                                // Only other participants active in the last 6 seconds
+                                if (uId != curUserId && isTyping && (now - updatedAt < 6000)) {
+                                    name
+                                } else {
+                                    null
+                                }
+                            }
+                            typingUsers = typers
+                        }
+                    }
+            } catch (e: Exception) {
+                Log.w("ChatScreen", "Failed to attach typing listener: ${e.message}")
+            }
         }
 
         onDispose {
             listenerRegistration?.remove()
+            typingListenerRegistration?.remove()
+            // Mark self as not typing on exit
+            if (firestore != null) {
+                try {
+                    firestore.collection("typing_indicators").document(indicatorDocId).set(
+                        hashMapOf(
+                            "conversationId" to conversationId,
+                            "userId" to curUserId,
+                            "userName" to (currentUser?.displayName ?: "User"),
+                            "isTyping" to false,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    )
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
         }
     }
 
@@ -300,10 +492,11 @@ fun ChatScreen(
         map.values.sortedBy { it.timestamp }
     }
 
-    // Auto-scroll to latest message
-    LaunchedEffect(displayMessages.size) {
-        if (displayMessages.isNotEmpty()) {
-            listState.animateScrollToItem(displayMessages.size - 1)
+    // Auto-scroll to latest message or active typing indicator
+    LaunchedEffect(displayMessages.size, isOtherParticipantTyping) {
+        val targetIndex = displayMessages.size + (if (isOtherParticipantTyping) 1 else 0) - 1
+        if (targetIndex >= 0) {
+            listState.animateScrollToItem(targetIndex)
         }
     }
 
@@ -357,10 +550,224 @@ fun ChatScreen(
 
             inputText = ""
             isSending = false
+
+            // Clear self typing indicator in Firestore immediately upon sending
+            try {
+                val indicatorDocId = "${conversationId}_${curUserId}"
+                firestore?.collection("typing_indicators")?.document(indicatorDocId)?.set(
+                    hashMapOf(
+                        "conversationId" to conversationId,
+                        "userId" to curUserId,
+                        "userName" to curUserName,
+                        "isTyping" to false,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                )
+            } catch (e: Exception) {
+                // Ignore
+            }
+
             coroutineScope.launch {
                 if (displayMessages.isNotEmpty()) {
                     listState.animateScrollToItem(displayMessages.size - 1)
                 }
+            }
+        }
+    }
+
+    val onToggleReaction: (ChatMessage, String) -> Unit = { targetMsg, emoji ->
+        val curUserId = currentUser?.id ?: "user_me"
+        val currentUsers = targetMsg.reactions[emoji] ?: emptyList()
+        val newUsers = if (currentUsers.contains(curUserId)) {
+            currentUsers - curUserId
+        } else {
+            currentUsers + curUserId
+        }
+        val newReactions = if (newUsers.isEmpty()) {
+            targetMsg.reactions - emoji
+        } else {
+            targetMsg.reactions + (emoji to newUsers)
+        }
+        val newPrimaryReaction = newReactions.keys.firstOrNull()
+
+        // 1. Optimistic UI update on firestoreMessages
+        firestoreMessages = firestoreMessages.map { msg ->
+            if (msg.id == targetMsg.id) {
+                msg.copy(
+                    reactions = newReactions,
+                    reaction = newPrimaryReaction
+                )
+            } else msg
+        }
+
+        // 2. Local repository update
+        repository?.toggleMessageReaction(conversationId, targetMsg.id, emoji, curUserId)
+
+        // 3. Real-time Cloud Firestore write
+        if (firestore != null) {
+            coroutineScope.launch {
+                try {
+                    firestore.collection("messages").document(targetMsg.id).set(
+                        mapOf(
+                            "reactions" to newReactions,
+                            "reaction" to newPrimaryReaction
+                        ),
+                        SetOptions.merge()
+                    ).addOnFailureListener { e ->
+                        Log.w("ChatScreen", "Failed to update reaction in Firestore: ${e.message}")
+                    }
+                } catch (e: Exception) {
+                    Log.w("ChatScreen", "Firestore reaction error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            val audioDir = File(context.cacheDir, "voice_recordings").apply { mkdirs() }
+            val audioFile = File(audioDir, "voice_${System.currentTimeMillis()}.m4a")
+            val started = voiceRecorderManager.startRecording(audioFile)
+            if (started) {
+                isVoiceRecording = true
+            }
+        } else {
+            Log.w("ChatScreen", "Record audio permission denied")
+        }
+    }
+
+    val startVoiceRecordingAction: () -> Unit = {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPermission) {
+            val audioDir = File(context.cacheDir, "voice_recordings").apply { mkdirs() }
+            val audioFile = File(audioDir, "voice_${System.currentTimeMillis()}.m4a")
+            val started = voiceRecorderManager.startRecording(audioFile)
+            if (started) {
+                isVoiceRecording = true
+            }
+        } else {
+            recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    val cancelVoiceRecordingAction: () -> Unit = {
+        voiceRecorderManager.cancelRecording()
+        isVoiceRecording = false
+    }
+
+    val sendVoiceRecordingAction: () -> Unit = {
+        val (recordedFile, durationMs) = voiceRecorderManager.stopRecording()
+        isVoiceRecording = false
+
+        if (recordedFile != null && durationMs > 400) {
+            val msgId = "m_" + UUID.randomUUID().toString().take(8)
+            val curUserId = currentUser?.id ?: "user_me"
+            val curUserName = currentUser?.displayName ?: "Alex Rivers"
+            val now = System.currentTimeMillis()
+            val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
+            val formattedTime = timeFormat.format(Date(now))
+            val durationSec = (durationMs / 1000).toInt().coerceAtLeast(1)
+            val localUri = Uri.fromFile(recordedFile).toString()
+            val textCaption = "🎙️ Voice note (${durationSec}s)"
+
+            // 1. Optimistic UI update in chat
+            val optimisticVoiceMsg = ChatMessage(
+                id = msgId,
+                conversationId = conversationId,
+                senderId = curUserId,
+                senderName = curUserName,
+                text = textCaption,
+                mediaUri = localUri,
+                mediaType = "audio",
+                timestamp = now,
+                timeFormatted = formattedTime,
+                isBlink = isBlinkMode,
+                blinkSecondsRemaining = if (isBlinkMode) 15 else 0,
+                isFromMe = true
+            )
+            firestoreMessages = (firestoreMessages + optimisticVoiceMsg).sortedBy { it.timestamp }
+
+            // 2. Repository fallback update
+            repository?.sendMessage(
+                conversationId = conversationId,
+                text = textCaption,
+                isBlink = isBlinkMode,
+                mediaType = "audio",
+                mediaUri = localUri
+            )
+
+            // 3. Upload to Firebase Storage and update Firestore message
+            FirebaseStorageAudioUploader.uploadVoiceClip(
+                audioFile = recordedFile,
+                conversationId = conversationId,
+                messageId = msgId,
+                onSuccess = { downloadUrl ->
+                    try {
+                        val payload = hashMapOf(
+                            "id" to msgId,
+                            "conversationId" to conversationId,
+                            "senderId" to curUserId,
+                            "senderName" to curUserName,
+                            "text" to textCaption,
+                            "mediaUri" to downloadUrl,
+                            "mediaType" to "audio",
+                            "isBlink" to isBlinkMode,
+                            "blinkSecondsRemaining" to (if (isBlinkMode) 15 else 0),
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "timestamp" to now,
+                            "timeFormatted" to formattedTime
+                        )
+                        firestore?.collection("messages")?.document(msgId)?.set(payload, SetOptions.merge())
+                    } catch (e: Exception) {
+                        Log.w("ChatScreen", "Failed to update voice message in Firestore: ${e.message}")
+                    }
+                },
+                onFailure = { e ->
+                    Log.w("ChatScreen", "Firebase Storage voice note upload failed: ${e.message}")
+                }
+            )
+
+            coroutineScope.launch {
+                delay(100)
+                if (firestoreMessages.isNotEmpty()) {
+                    listState.animateScrollToItem(firestoreMessages.size - 1)
+                }
+            }
+        }
+    }
+
+    val onToggleAudioPlayback: (ChatMessage) -> Unit = { message ->
+        val uri = message.mediaUri
+        if (!uri.isNullOrBlank()) {
+            if (playingAudioMessageId == message.id) {
+                if (audioPlayerManager.isPlaying) {
+                    audioPlayerManager.pause()
+                } else {
+                    audioPlayerManager.resume()
+                }
+            } else {
+                playingAudioMessageId = message.id
+                audioPlaybackProgress = 0f
+                audioCurrentPositionMs = 0
+                audioPlayerManager.play(
+                    uriString = uri,
+                    onCompletion = {
+                        playingAudioMessageId = null
+                        audioPlaybackProgress = 0f
+                        audioCurrentPositionMs = 0
+                    },
+                    onError = { err ->
+                        Log.w("ChatScreen", "Playback failed: $err")
+                        playingAudioMessageId = null
+                        audioPlaybackProgress = 0f
+                    }
+                )
             }
         }
     }
@@ -428,11 +835,32 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                            Text(
-                                text = if (isRecipientOnline) "@$recipientUsername • Active now" else "@$recipientUsername • Offline",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            if (isOtherParticipantTyping) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.testTag("chat_header_typing_indicator")
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(BlinkCyanLight)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "$typingDisplayName is typing...",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = BlinkCyanLight
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = if (isRecipientOnline) "@$recipientUsername • Active now" else "@$recipientUsername • Offline",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 },
@@ -604,143 +1032,294 @@ fun ChatScreen(
                     }
                 }
 
+                // Real-time typing notification banner right above input field
+                AnimatedVisibility(
+                    visible = isOtherParticipantTyping,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            .padding(horizontal = 16.dp, vertical = 5.dp)
+                            .testTag("chat_bottom_typing_banner"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(BlinkCyanLight)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "$typingDisplayName is typing...",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = BlinkCyanLight
+                        )
+                    }
+                }
+
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
-                // Input Field Row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Quick Blink Toggle inside input bar
-                    IconButton(
-                        onClick = { isBlinkMode = !isBlinkMode },
+                if (isVoiceRecording) {
+                    // Voice Recording Active Bar
+                    Row(
                         modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (isBlinkMode) BlinkPink.copy(alpha = 0.2f)
-                                else MaterialTheme.colorScheme.surfaceVariant
-                            )
-                            .testTag("chat_quick_blink_button")
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("chat_voice_recording_active_bar"),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Bolt,
-                            contentDescription = "Toggle Blink",
-                            tint = if (isBlinkMode) BlinkPink else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // Camera Snap button (CameraX Preview & Snap)
-                    IconButton(
-                        onClick = { isCameraSnapOpen = true },
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .testTag("chat_camera_snap_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CameraAlt,
-                            contentDescription = "Snap Photo or Video",
-                            tint = BlinkCyanLight,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // Gallery Picker button (Pick Photo or Video)
-                    IconButton(
-                        onClick = {
-                            galleryPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                        // Cancel / Trash button
+                        IconButton(
+                            onClick = cancelVoiceRecordingAction,
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
+                                .testTag("chat_voice_cancel_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Cancel recording",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(22.dp)
                             )
-                        },
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .testTag("chat_gallery_media_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AddPhotoAlternate,
-                            contentDescription = "Pick Media from Gallery",
-                            tint = BlinkPrimaryLight,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
+                        }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
 
-                    // Main Text Input Field
-                    OutlinedTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("chat_input_field")
-                            .testTag("chat_text_input"),
-                        placeholder = {
-                            Text(
-                                text = if (isBlinkMode) "Send disappearing Blink..." else "Type a message...",
-                                fontSize = 14.sp
-                            )
-                        },
-                        shape = RoundedCornerShape(24.dp),
-                        maxLines = 4,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { onSendAction() }),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = if (isBlinkMode) BlinkPink else BlinkPrimary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
-                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
-                        )
-                    )
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // Send Button
-                    val canSend = inputText.trim().isNotBlank()
-                    val sendScale by animateFloatAsState(
-                        targetValue = if (canSend) 1.05f else 1.0f,
-                        label = "send_scale"
-                    )
-
-                    IconButton(
-                        onClick = onSendAction,
-                        enabled = canSend,
-                        modifier = Modifier
-                            .size(44.dp)
-                            .scale(sendScale)
-                            .clip(CircleShape)
-                            .background(
-                                if (canSend) {
-                                    if (isBlinkMode) Brush.linearGradient(listOf(BlinkPink, BlinkAmber))
-                                    else Brush.linearGradient(listOf(BlinkPrimary, BlinkCyan))
-                                } else {
-                                    Brush.linearGradient(
-                                        listOf(
-                                            MaterialTheme.colorScheme.surfaceVariant,
-                                            MaterialTheme.colorScheme.surfaceVariant
-                                        )
+                        // Waveform and recording duration indicator
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            border = BorderStroke(1.dp, BlinkPink.copy(alpha = 0.4f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                // Pulsing red dot & timer
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    val pulseAlpha by rememberInfiniteTransition(label = "rec_pulse").animateFloat(
+                                        initialValue = 0.3f,
+                                        targetValue = 1f,
+                                        animationSpec = infiniteRepeatable(
+                                            animation = tween(500, easing = LinearEasing),
+                                            repeatMode = RepeatMode.Reverse
+                                        ),
+                                        label = "rec_pulse_alpha"
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(10.dp)
+                                            .clip(CircleShape)
+                                            .alpha(pulseAlpha)
+                                            .background(Color.Red)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    val totalSeconds = (voiceRecordingTicks * 200) / 1000
+                                    Text(
+                                        text = String.format("%d:%02d", totalSeconds / 60, totalSeconds % 60),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
                                     )
                                 }
+
+                                // Undulating mini waveform
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.height(18.dp)
+                                ) {
+                                    val normalizedAmp = (voiceAmplitude / 1200).coerceIn(1, 8)
+                                    for (i in 0 until 12) {
+                                        val barHeight = ((i % 4 + 2) * normalizedAmp).coerceIn(4, 18)
+                                        Box(
+                                            modifier = Modifier
+                                                .width(3.dp)
+                                                .height(barHeight.dp)
+                                                .clip(RoundedCornerShape(2.dp))
+                                                .background(
+                                                    if (i % 2 == 0) BlinkCyanLight else BlinkPrimaryLight
+                                                )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        // Send Voice Clip button
+                        IconButton(
+                            onClick = sendVoiceRecordingAction,
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(Brush.linearGradient(listOf(BlinkPrimary, BlinkCyan)))
+                                .testTag("chat_voice_send_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Send Voice Clip",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
                             )
-                            .testTag("chat_send_button")
-                            .testTag("send_message_button")
+                        }
+                    }
+                } else {
+                    // Input Field Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send Message",
-                            tint = if (canSend) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                            modifier = Modifier.size(20.dp)
+                        // Quick Blink Toggle inside input bar
+                        IconButton(
+                            onClick = { isBlinkMode = !isBlinkMode },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (isBlinkMode) BlinkPink.copy(alpha = 0.2f)
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .testTag("chat_quick_blink_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Bolt,
+                                contentDescription = "Toggle Blink",
+                                tint = if (isBlinkMode) BlinkPink else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Camera Snap button (CameraX Preview & Snap)
+                        IconButton(
+                            onClick = { isCameraSnapOpen = true },
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .testTag("chat_camera_snap_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Snap Photo or Video",
+                                tint = BlinkCyanLight,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Gallery Picker button (Pick Photo or Video)
+                        IconButton(
+                            onClick = {
+                                galleryPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                )
+                            },
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .testTag("chat_gallery_media_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = "Pick Media from Gallery",
+                                tint = BlinkPrimaryLight,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        // Main Text Input Field
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("chat_input_field")
+                                .testTag("chat_text_input"),
+                            placeholder = {
+                                Text(
+                                    text = if (isBlinkMode) "Send disappearing Blink..." else "Type a message...",
+                                    fontSize = 14.sp
+                                )
+                            },
+                            shape = RoundedCornerShape(24.dp),
+                            maxLines = 4,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = { onSendAction() }),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = if (isBlinkMode) BlinkPink else BlinkPrimary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                            )
                         )
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        // Send or Mic Record Button
+                        val canSend = inputText.trim().isNotBlank()
+                        if (canSend) {
+                            val sendScale by animateFloatAsState(
+                                targetValue = 1.05f,
+                                label = "send_scale"
+                            )
+                            IconButton(
+                                onClick = onSendAction,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .scale(sendScale)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isBlinkMode) Brush.linearGradient(listOf(BlinkPink, BlinkAmber))
+                                        else Brush.linearGradient(listOf(BlinkPrimary, BlinkCyan))
+                                    )
+                                    .testTag("chat_send_button")
+                                    .testTag("send_message_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Send Message",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        } else {
+                            IconButton(
+                                onClick = startVoiceRecordingAction,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.linearGradient(listOf(BlinkPrimary, BlinkCyan))
+                                    )
+                                    .testTag("chat_voice_record_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Mic,
+                                    contentDescription = "Record Voice Message",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -870,14 +1449,37 @@ fun ChatScreen(
                             }
                         }
 
+                        val curUserId = currentUser?.id ?: "user_me"
                         ChatMessageBubble(
                             message = message,
                             recipientAvatarColor = recipientAvatarColorHex,
                             recipientName = conversationTitle,
+                            currentUserId = curUserId,
+                            currentlyPlayingId = playingAudioMessageId,
+                            isAudioPlaying = audioPlayerManager.isPlaying,
+                            playbackProgress = audioPlaybackProgress,
+                            currentPositionMs = audioCurrentPositionMs,
                             onMediaClick = { clickedMsg ->
                                 selectedMediaForFullscreen = clickedMsg
+                            },
+                            onToggleAudioPlayback = onToggleAudioPlayback,
+                            onReactionClick = { emoji ->
+                                onToggleReaction(message, emoji)
+                            },
+                            onLongClick = {
+                                selectedMessageForReaction = message
                             }
                         )
+                    }
+
+                    // Real-Time Animated Typing Indicator Bubble inside message stream
+                    if (isOtherParticipantTyping) {
+                        item(key = "realtime_typing_indicator_bubble") {
+                            TypingIndicatorBubble(
+                                recipientName = typingDisplayName,
+                                recipientAvatarColor = recipientAvatarColorHex
+                            )
+                        }
                     }
                 }
             }
@@ -982,6 +1584,20 @@ fun ChatScreen(
             onDismiss = { selectedMediaForFullscreen = null }
         )
     }
+
+    // Real-Time Message Reaction Picker Dialog
+    if (selectedMessageForReaction != null) {
+        val curUserId = currentUser?.id ?: "user_me"
+        MessageReactionPickerDialog(
+            message = selectedMessageForReaction!!,
+            currentUserId = curUserId,
+            onDismiss = { selectedMessageForReaction = null },
+            onReactionSelected = { emoji ->
+                onToggleReaction(selectedMessageForReaction!!, emoji)
+                selectedMessageForReaction = null
+            }
+        )
+    }
 }
 
 /**
@@ -1013,15 +1629,25 @@ fun ChatScreen(
  * Message bubble item rendering distinct styles for outgoing (from me) vs incoming messages,
  * supporting text, photos, and video attachments stored in Cloud Firestore.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatMessageBubble(
     message: ChatMessage,
     recipientAvatarColor: String,
     recipientName: String,
+    currentUserId: String = "user_me",
+    currentlyPlayingId: String? = null,
+    isAudioPlaying: Boolean = false,
+    playbackProgress: Float = 0f,
+    currentPositionMs: Int = 0,
     onMediaClick: ((ChatMessage) -> Unit)? = null,
+    onToggleAudioPlayback: ((ChatMessage) -> Unit)? = null,
+    onReactionClick: ((String) -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isFromMe = message.isFromMe
+    val haptics = LocalHapticFeedback.current
 
     Column(
         modifier = modifier
@@ -1044,43 +1670,57 @@ fun ChatMessageBubble(
                 )
             }
 
-            // Message Bubble Surface
-            Surface(
-                shape = if (isFromMe) {
-                    RoundedCornerShape(
-                        topStart = 18.dp,
-                        topEnd = 18.dp,
-                        bottomStart = 18.dp,
-                        bottomEnd = 4.dp
-                    )
-                } else {
-                    RoundedCornerShape(
-                        topStart = 18.dp,
-                        topEnd = 18.dp,
-                        bottomStart = 4.dp,
-                        bottomEnd = 18.dp
-                    )
-                },
-                color = if (isFromMe) {
-                    if (message.isBlink) BlinkPink else BlinkPrimary
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                tonalElevation = 2.dp,
-                modifier = Modifier
-                    .clip(
-                        if (isFromMe) RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
-                        else RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp)
-                    )
-                    .then(
-                        if (isFromMe) {
-                            Modifier.background(
-                                if (message.isBlink) Brush.horizontalGradient(listOf(BlinkPink, BlinkAmber))
-                                else Brush.horizontalGradient(listOf(BlinkPrimary, BlinkCyan))
-                            )
-                        } else Modifier
-                    )
+            Column(
+                horizontalAlignment = if (isFromMe) Alignment.End else Alignment.Start
             ) {
+                // Message Bubble Surface
+                Surface(
+                    shape = if (isFromMe) {
+                        RoundedCornerShape(
+                            topStart = 18.dp,
+                            topEnd = 18.dp,
+                            bottomStart = 18.dp,
+                            bottomEnd = 4.dp
+                        )
+                    } else {
+                        RoundedCornerShape(
+                            topStart = 18.dp,
+                            topEnd = 18.dp,
+                            bottomStart = 4.dp,
+                            bottomEnd = 18.dp
+                        )
+                    },
+                    color = if (isFromMe) {
+                        if (message.isBlink) BlinkPink else BlinkPrimary
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
+                    tonalElevation = 2.dp,
+                    modifier = Modifier
+                        .clip(
+                            if (isFromMe) RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
+                            else RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp)
+                        )
+                        .then(
+                            if (isFromMe) {
+                                Modifier.background(
+                                    if (message.isBlink) Brush.horizontalGradient(listOf(BlinkPink, BlinkAmber))
+                                    else Brush.horizontalGradient(listOf(BlinkPrimary, BlinkCyan))
+                                )
+                            } else Modifier
+                        )
+                        .combinedClickable(
+                            onClick = {
+                                if (!message.mediaUri.isNullOrBlank()) {
+                                    onMediaClick?.invoke(message)
+                                }
+                            },
+                            onLongClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onLongClick?.invoke()
+                            }
+                        )
+                ) {
                 Column(
                     modifier = Modifier.padding(
                         horizontal = if (!message.mediaUri.isNullOrBlank()) 6.dp else 14.dp,
@@ -1121,112 +1761,234 @@ fun ChatMessageBubble(
                         Spacer(modifier = Modifier.height(2.dp))
                     }
 
-                    // Photo or Video Media Attachment from CameraX / Firestore
+                    // Media Attachment from CameraX / Firestore / Voice Notes
                     if (!message.mediaUri.isNullOrBlank()) {
+                        val isAudio = message.mediaType.equals("audio", ignoreCase = true)
                         val isVideo = message.mediaType.equals("video", ignoreCase = true)
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 140.dp, max = 220.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.Black.copy(alpha = 0.25f))
-                                .clickable { onMediaClick?.invoke(message) }
-                                .padding(bottom = 4.dp)
-                        ) {
-                            AsyncImage(
-                                model = message.mediaUri,
-                                contentDescription = if (isVideo) "Video clip" else "Photo snap",
-                                contentScale = ContentScale.Crop,
+
+                        if (isAudio) {
+                            // Voice Note Audio Player
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isFromMe) Color.White.copy(alpha = 0.15f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isFromMe) Color.White.copy(alpha = 0.3f)
+                                    else BlinkCyanLight.copy(alpha = 0.4f)
+                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(200.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .testTag(if (isVideo) "chat_message_video_${message.id}" else "chat_message_photo_${message.id}")
-                            )
-
-                            // Video Overlay: Play button in center
-                            if (isVideo) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(Color.Black.copy(alpha = 0.3f)),
-                                    contentAlignment = Alignment.Center
+                                    .padding(bottom = 6.dp)
+                                    .testTag("voice_note_bubble_${message.id}")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Surface(
-                                        modifier = Modifier.size(48.dp),
-                                        shape = CircleShape,
-                                        color = Color.Black.copy(alpha = 0.65f),
-                                        border = BorderStroke(1.5.dp, BlinkCyanLight)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                imageVector = Icons.Default.PlayArrow,
-                                                contentDescription = "Play Video",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(30.dp)
+                                    val isThisPlaying = (currentlyPlayingId == message.id && isAudioPlaying)
+                                    IconButton(
+                                        onClick = { onToggleAudioPlayback?.invoke(message) },
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (isThisPlaying) BlinkCyan
+                                                else if (isFromMe) Color.White
+                                                else BlinkPrimary
                                             )
+                                            .testTag("voice_play_pause_${message.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isThisPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                            contentDescription = if (isThisPlaying) "Pause voice note" else "Play voice note",
+                                            tint = if (isThisPlaying) Color.Black else if (isFromMe) BlinkPrimary else Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        // Visual Waveform Bars
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(20.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            val barHeights = listOf(
+                                                8, 14, 20, 10, 16, 22, 12, 18, 14, 20, 10, 22, 16, 12, 18, 14, 20
+                                            )
+                                            val progress = if (currentlyPlayingId == message.id) playbackProgress else 0f
+                                            barHeights.forEachIndexed { index, heightDp ->
+                                                val barFraction = index.toFloat() / barHeights.size.toFloat()
+                                                val isPlayed = barFraction <= progress
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(heightDp.dp)
+                                                        .clip(RoundedCornerShape(2.dp))
+                                                        .background(
+                                                            if (isPlayed) (if (isFromMe) Color.White else BlinkCyanLight)
+                                                            else (if (isFromMe) Color.White.copy(alpha = 0.35f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f))
+                                                        )
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(3.dp))
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = if (currentlyPlayingId == message.id && currentPositionMs > 0) {
+                                                    val sec = (currentPositionMs / 1000) % 60
+                                                    val min = (currentPositionMs / 1000) / 60
+                                                    String.format("%d:%02d", min, sec)
+                                                } else {
+                                                    "Voice Note"
+                                                },
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = if (isFromMe) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(
+                                                    imageVector = Icons.Default.GraphicEq,
+                                                    contentDescription = null,
+                                                    tint = if (isFromMe) Color.White.copy(alpha = 0.7f) else BlinkCyanLight,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(3.dp))
+                                                Text(
+                                                    text = "Audio",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isFromMe) Color.White.copy(alpha = 0.7f) else BlinkCyanLight
+                                                )
+                                            }
                                         }
                                     }
                                 }
-
-                                // Video tag in top-left
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = BlinkPink.copy(alpha = 0.85f),
-                                    modifier = Modifier
-                                        .align(Alignment.TopStart)
-                                        .padding(8.dp)
-                                ) {
-                                    Text(
-                                        text = "🎬 VIDEO",
-                                        color = Color.White,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                                    )
-                                }
-                            } else {
-                                // Photo tag in top-left
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = BlinkPrimary.copy(alpha = 0.85f),
-                                    modifier = Modifier
-                                        .align(Alignment.TopStart)
-                                        .padding(8.dp)
-                                ) {
-                                    Text(
-                                        text = "📸 PHOTO",
-                                        color = Color.White,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                                    )
-                                }
                             }
-
-                            // Fullscreen icon in bottom-right
-                            Surface(
-                                shape = CircleShape,
-                                color = Color.Black.copy(alpha = 0.6f),
+                        } else {
+                            // Photo or Video Media Attachment from CameraX / Firestore
+                            Box(
                                 modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .padding(8.dp)
-                                    .size(26.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.Fullscreen,
-                                        contentDescription = "View Fullscreen",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
+                                    .fillMaxWidth()
+                                    .heightIn(min = 140.dp, max = 220.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.Black.copy(alpha = 0.25f))
+                                    .combinedClickable(
+                                        onClick = { onMediaClick?.invoke(message) },
+                                        onLongClick = {
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            onLongClick?.invoke()
+                                        }
                                     )
+                                    .padding(bottom = 4.dp)
+                            ) {
+                                AsyncImage(
+                                    model = message.mediaUri,
+                                    contentDescription = if (isVideo) "Video clip" else "Photo snap",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(200.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .testTag(if (isVideo) "chat_message_video_${message.id}" else "chat_message_photo_${message.id}")
+                                )
+
+                                // Video Overlay: Play button in center
+                                if (isVideo) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black.copy(alpha = 0.3f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Surface(
+                                            modifier = Modifier.size(48.dp),
+                                            shape = CircleShape,
+                                            color = Color.Black.copy(alpha = 0.65f),
+                                            border = BorderStroke(1.5.dp, BlinkCyanLight)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PlayArrow,
+                                                    contentDescription = "Play Video",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(30.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Video tag in top-left
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = BlinkPink.copy(alpha = 0.85f),
+                                        modifier = Modifier
+                                            .align(Alignment.TopStart)
+                                            .padding(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "🎬 VIDEO",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                } else {
+                                    // Photo tag in top-left
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = BlinkPrimary.copy(alpha = 0.85f),
+                                        modifier = Modifier
+                                            .align(Alignment.TopStart)
+                                            .padding(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "📸 PHOTO",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                // Fullscreen icon in bottom-right
+                                Surface(
+                                    shape = CircleShape,
+                                    color = Color.Black.copy(alpha = 0.6f),
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(8.dp)
+                                        .size(26.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Fullscreen,
+                                            contentDescription = "View Fullscreen",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
                     // Message text caption body
-                    if (message.text.isNotBlank()) {
+                    if (message.text.isNotBlank() && (!message.mediaType.equals("audio", ignoreCase = true) || !message.text.startsWith("🎙️ Voice note"))) {
                         Text(
                             text = message.text,
                             color = if (isFromMe) Color.White else MaterialTheme.colorScheme.onSurface,
@@ -1282,8 +2044,84 @@ fun ChatMessageBubble(
                     }
                 }
             }
+
+            // Real-time reactions row attached to this message
+            val activeReactions = message.reactions.filterValues { it.isNotEmpty() }
+            if (activeReactions.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Row(
+                    modifier = Modifier
+                        .padding(
+                            start = if (isFromMe) 0.dp else 4.dp,
+                            end = if (isFromMe) 4.dp else 0.dp
+                        )
+                        .testTag("chat_message_reactions_${message.id}"),
+                    horizontalArrangement = if (isFromMe) Arrangement.End else Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    activeReactions.forEach { (emoji, reactors) ->
+                        val hasUserReacted = reactors.contains(currentUserId)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (hasUserReacted) BlinkPrimary.copy(alpha = 0.28f)
+                            else MaterialTheme.colorScheme.surfaceVariant,
+                            border = BorderStroke(
+                                1.dp,
+                                if (hasUserReacted) BlinkCyanLight.copy(alpha = 0.85f)
+                                else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                            ),
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onReactionClick?.invoke(emoji) }
+                                .testTag("reaction_chip_${message.id}_${emoji}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = emoji,
+                                    fontSize = 12.sp
+                                )
+                                if (reactors.size > 1) {
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = "${reactors.size}",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (hasUserReacted) BlinkCyanLight else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Small "+" add reaction pill
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .clickable { onLongClick?.invoke() }
+                            .testTag("add_reaction_chip_${message.id}")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Add reaction",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
+}
 }
 
 /**
@@ -1409,6 +2247,336 @@ fun FullscreenChatMediaDialog(
                         color = BlinkTextSecondary,
                         fontSize = 11.sp
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Polished animated 3-dot typing indicator bubble showing when another participant is writing,
+ * synchronized in real-time through Cloud Firestore.
+ */
+@Composable
+fun TypingIndicatorBubble(
+    recipientName: String,
+    recipientAvatarColor: String,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "typing_dots_transition")
+
+    // Staggered vertical bouncing animations for the three dots
+    val dot1Offset by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = -7f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 420, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot1_offset"
+    )
+
+    val dot2Offset by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = -7f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 420, delayMillis = 140, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot2_offset"
+    )
+
+    val dot3Offset by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = -7f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 420, delayMillis = 280, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot3_offset"
+    )
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .testTag("chat_typing_indicator"),
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.Start
+    ) {
+        AvatarBadge(
+            name = recipientName,
+            colorHex = recipientAvatarColor,
+            size = 28.dp,
+            modifier = Modifier.padding(end = 6.dp, bottom = 2.dp)
+        )
+
+        Surface(
+            shape = RoundedCornerShape(
+                topStart = 18.dp,
+                topEnd = 18.dp,
+                bottomStart = 4.dp,
+                bottomEnd = 18.dp
+            ),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            tonalElevation = 2.dp,
+            border = BorderStroke(1.dp, BlinkCyanLight.copy(alpha = 0.25f)),
+            modifier = Modifier.clip(RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp))
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Three animated bouncing dots
+                Box(
+                    modifier = Modifier
+                        .offset(y = dot1Offset.dp)
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(BlinkCyanLight)
+                )
+                Box(
+                    modifier = Modifier
+                        .offset(y = dot2Offset.dp)
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(BlinkPrimaryLight)
+                )
+                Box(
+                    modifier = Modifier
+                        .offset(y = dot3Offset.dp)
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(BlinkPinkLight)
+                )
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                Text(
+                    text = "$recipientName is typing...",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Modern floating reaction picker dialog allowing users to pick an emoji
+ * or toggle an existing reaction in real time via Cloud Firestore.
+ */
+@Composable
+fun MessageReactionPickerDialog(
+    message: ChatMessage,
+    currentUserId: String,
+    onDismiss: () -> Unit,
+    onReactionSelected: (String) -> Unit
+) {
+    var showAllEmojis by remember { mutableStateOf(false) }
+    val quickEmojis = listOf("❤️", "🔥", "😂", "👍", "😮", "😢", "⚡", "🎉")
+    val extendedEmojis = listOf(
+        "✨", "🙌", "💯", "🚀", "👀", "👏", "😎", "💡",
+        "💔", "🥳", "🙏", "🤩", "🎯", "💀", "🫡", "🤝"
+    )
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .clickable { onDismiss() }
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 380.dp)
+                    .clickable(enabled = false) {}
+                    .testTag("reaction_picker_dialog"),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                border = BorderStroke(1.5.dp, BlinkCyanLight.copy(alpha = 0.35f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Header row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Outlined.EmojiEmotions,
+                                contentDescription = null,
+                                tint = BlinkCyanLight,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "React with Emoji",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    // Message snippet preview
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp)
+                    ) {
+                        val previewText = when {
+                            message.text.isNotBlank() -> message.text
+                            message.mediaType == "video" -> "🎬 Video clip"
+                            message.mediaType == "photo" -> "📸 Photo snap"
+                            else -> "Message"
+                        }
+                        Text(
+                            text = previewText,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+
+                    // Quick Emojis Grid/Row
+                    Text(
+                        text = "Quick Reactions",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .align(Alignment.Start)
+                            .padding(bottom = 8.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        quickEmojis.forEach { emoji ->
+                            val isReactedByMe = message.reactions[emoji]?.contains(currentUserId) == true
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isReactedByMe) BlinkPrimary.copy(alpha = 0.25f)
+                                else MaterialTheme.colorScheme.surfaceVariant,
+                                border = if (isReactedByMe) BorderStroke(1.5.dp, BlinkCyanLight) else null,
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .clickable { onReactionSelected(emoji) }
+                                    .testTag("reaction_picker_emoji_$emoji")
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = emoji,
+                                        fontSize = 20.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Expandable Extra Emojis
+                    AnimatedVisibility(visible = showAllEmojis) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 10.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                            )
+                            Text(
+                                text = "More Emojis",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            // 8 columns grid of extended emojis
+                            val chunked = extendedEmojis.chunked(8)
+                            chunked.forEach { rowEmojis ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    rowEmojis.forEach { emoji ->
+                                        val isReactedByMe = message.reactions[emoji]?.contains(currentUserId) == true
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = if (isReactedByMe) BlinkPrimary.copy(alpha = 0.25f)
+                                            else MaterialTheme.colorScheme.surfaceVariant,
+                                            border = if (isReactedByMe) BorderStroke(1.5.dp, BlinkCyanLight) else null,
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .clip(CircleShape)
+                                                .clickable { onReactionSelected(emoji) }
+                                                .testTag("reaction_picker_emoji_$emoji")
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = emoji,
+                                                    fontSize = 18.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Toggle More Button
+                    TextButton(
+                        onClick = { showAllEmojis = !showAllEmojis },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .testTag("reaction_picker_more_button")
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (showAllEmojis) "Show Less" else "+ More Emojis",
+                                color = BlinkPrimaryLight,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
                 }
             }
         }
