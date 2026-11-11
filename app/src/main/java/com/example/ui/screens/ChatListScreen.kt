@@ -7,6 +7,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -299,6 +300,16 @@ fun ChatListScreen(
 
             // --- VIEW A: CHATS & GROUPS LIST ---
             if (activeSection == ChatSectionTab.CHATS) {
+                val matchingFriends = remember(candidateUsers, searchQuery) {
+                    if (searchQuery.isBlank()) emptyList()
+                    else candidateUsers.filter {
+                        it.displayName.contains(searchQuery, ignoreCase = true) ||
+                        it.username.contains(searchQuery, ignoreCase = true) ||
+                        it.location.contains(searchQuery, ignoreCase = true) ||
+                        it.bio.contains(searchQuery, ignoreCase = true)
+                    }
+                }
+
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -307,60 +318,301 @@ fun ChatListScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 80.dp, top = 4.dp)
                 ) {
-                    // Blink AI Featured Pinned Card
-                    val aiConv = conversations.find { it.isAiBot }
-                    if (aiConv != null && searchQuery.isBlank()) {
+                    // When not searching, show "Friends & Contacts" quick bar
+                    if (searchQuery.isBlank()) {
                         item {
-                            Card(
+                            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "👥 Friends & Contacts",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = BlinkCyan.copy(alpha = 0.18f)
+                                        ) {
+                                            Text(
+                                                text = "${candidateUsers.size}",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = BlinkCyanLight,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+
+                                    TextButton(
+                                        onClick = { showNewChatDialog = true },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp).testTag("see_all_friends_button")
+                                    ) {
+                                        Text("Find more", fontSize = 11.sp, color = BlinkPrimaryLight, fontWeight = FontWeight.Bold)
+                                        Icon(Icons.Default.ChevronRight, contentDescription = null, modifier = Modifier.size(14.dp), tint = BlinkPrimaryLight)
+                                    }
+                                }
+
+                                LazyRow(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("friends_quick_contacts_row"),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+                                ) {
+                                    // Start New Chat Action Chip
+                                    item {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier
+                                                .width(62.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable { showNewChatDialog = true }
+                                                .testTag("quick_new_chat_button")
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(46.dp)
+                                                    .clip(CircleShape)
+                                                    .background(BlinkPrimary.copy(alpha = 0.15f))
+                                                    .border(1.5.dp, BlinkPrimary, CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Add,
+                                                    contentDescription = "New Chat",
+                                                    tint = BlinkPrimary,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = "New Chat",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    items(candidateUsers.take(15), key = { it.id }) { user ->
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier
+                                                .width(62.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable { onStartNewChat(user) }
+                                                .testTag("quick_friend_${user.username}")
+                                        ) {
+                                            AvatarBadge(
+                                                name = user.displayName,
+                                                colorHex = user.avatarColorHex,
+                                                size = 46.dp,
+                                                showOnline = true,
+                                                isOnline = user.isOnline
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = user.displayName.split(" ").firstOrNull() ?: user.displayName,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Blink AI Featured Pinned Card
+                        val aiConv = conversations.find { it.isAiBot }
+                        if (aiConv != null) {
+                            item {
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable { onSelectConversation(aiConv) }
+                                        .testTag("blink_ai_chat_card"),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                    shape = RoundedCornerShape(16.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(Brush.linearGradient(listOf(BlinkPrimaryDark.copy(alpha = 0.35f), BlinkCyan.copy(alpha = 0.15f))))
+                                            .padding(14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(46.dp)
+                                                .clip(CircleShape)
+                                                .background(Brush.radialGradient(listOf(BlinkPrimary, BlinkCyan))),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = "AI", tint = Color.White, modifier = Modifier.size(26.dp))
+                                        }
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(text = "Blink AI Copilot", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Surface(shape = RoundedCornerShape(8.dp), color = BlinkPrimary) {
+                                                    Text(text = "AI ⚡", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(text = aiConv.lastMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                                        }
+                                        Icon(imageVector = Icons.Default.ChevronRight, contentDescription = null, tint = BlinkPrimaryLight)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
+                        }
+                    }
+
+                    // SEARCH RESULTS: Matching Active Conversations
+                    if (filteredConversations.isNotEmpty()) {
+                        if (searchQuery.isNotBlank()) {
+                            item {
+                                Text(
+                                    text = "💬 Chats (${filteredConversations.size})",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        items(filteredConversations.filter { !it.isAiBot }, key = { it.id }) { conv ->
+                            ConversationItem(
+                                conversation = conv,
+                                onClick = { onSelectConversation(conv) }
+                            )
+                        }
+                    }
+
+                    // SEARCH RESULTS: Matching Friends & Contacts (to start a new conversation!)
+                    if (searchQuery.isNotBlank() && matchingFriends.isNotEmpty()) {
+                        item {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "👥 Friends & Contacts (${matchingFriends.size})",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = BlinkPrimaryLight,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        items(matchingFriends, key = { "search_friend_${it.id}" }) { friend ->
+                            Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .clickable { onSelectConversation(aiConv) }
-                                    .testTag("blink_ai_chat_card"),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                                shape = RoundedCornerShape(16.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onStartNewChat(friend) }
+                                    .testTag("search_friend_item_${friend.username}"),
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                             ) {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(Brush.linearGradient(listOf(BlinkPrimaryDark.copy(alpha = 0.35f), BlinkCyan.copy(alpha = 0.15f))))
-                                        .padding(14.dp),
+                                        .padding(12.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(46.dp)
-                                            .clip(CircleShape)
-                                            .background(Brush.radialGradient(listOf(BlinkPrimary, BlinkCyan))),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = "AI", tint = Color.White, modifier = Modifier.size(26.dp))
-                                    }
+                                    AvatarBadge(
+                                        name = friend.displayName,
+                                        colorHex = friend.avatarColorHex,
+                                        size = 46.dp,
+                                        showOnline = true,
+                                        isOnline = friend.isOnline
+                                    )
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(text = "Blink AI Copilot", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Surface(shape = RoundedCornerShape(8.dp), color = BlinkPrimary) {
-                                                Text(text = "AI ⚡", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                            }
+                                        Text(
+                                            text = friend.displayName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "@${friend.username} • 📍 ${friend.location}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        if (friend.bio.isNotBlank()) {
+                                            Text(
+                                                text = friend.bio,
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
                                         }
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(text = aiConv.lastMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                                     }
-                                    Icon(imageVector = Icons.Default.ChevronRight, contentDescription = null, tint = BlinkPrimaryLight)
+                                    Button(
+                                        onClick = { onStartNewChat(friend) },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = BlinkPrimary),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .height(34.dp)
+                                            .testTag("start_chat_friend_${friend.username}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Chat,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Chat", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                             }
-                            Spacer(modifier = Modifier.height(6.dp))
                         }
                     }
 
-                    // Conversations List (1-on-1 & Group Chats)
-                    items(filteredConversations.filter { !it.isAiBot }, key = { it.id }) { conv ->
-                        ConversationItem(
-                            conversation = conv,
-                            onClick = { onSelectConversation(conv) }
-                        )
+                    // Empty Search State
+                    if (searchQuery.isNotBlank() && filteredConversations.isEmpty() && matchingFriends.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 48.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        imageVector = Icons.Default.SearchOff,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(44.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "No chats or friends matching \"$searchQuery\"",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.testTag("chat_search_empty_text")
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -739,50 +991,14 @@ fun ChatListScreen(
             )
         }
 
-        // --- Start 1-on-1 Chat Friend Picker Modal ---
+        // --- Start 1-on-1 Chat Searchable Friend Picker Modal ---
         if (showNewChatDialog) {
-            AlertDialog(
-                onDismissRequest = { showNewChatDialog = false },
-                title = { Text("Start Chat with Friend", fontWeight = FontWeight.Bold) },
-                text = {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 300.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(candidateUsers) { user ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable {
-                                        showNewChatDialog = false
-                                        onStartNewChat(user)
-                                    }
-                                    .padding(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                AvatarBadge(
-                                    name = user.displayName,
-                                    colorHex = user.avatarColorHex,
-                                    size = 42.dp,
-                                    showOnline = true,
-                                    isOnline = user.isOnline
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Text(text = user.displayName, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    Text(text = "@${user.username} • 📍 ${user.location}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showNewChatDialog = false }) {
-                        Text("Cancel")
-                    }
+            SearchableFriendPickerDialog(
+                candidateUsers = candidateUsers,
+                onDismiss = { showNewChatDialog = false },
+                onSelectUser = { user ->
+                    showNewChatDialog = false
+                    onStartNewChat(user)
                 }
             )
         }
@@ -961,4 +1177,270 @@ fun ConversationItem(
             }
         }
     }
+}
+
+/**
+ * Searchable friend picker dialog allowing users to search by name, @username, location,
+ * filter by online status, and immediately start conversations with specific contacts.
+ */
+@Composable
+fun SearchableFriendPickerDialog(
+    candidateUsers: List<User>,
+    onDismiss: () -> Unit,
+    onSelectUser: (User) -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    var showOnlyOnline by remember { mutableStateOf(false) }
+
+    val filteredFriends = remember(candidateUsers, query, showOnlyOnline) {
+        candidateUsers.filter { user ->
+            val matchesQuery = query.isBlank() ||
+                user.displayName.contains(query, ignoreCase = true) ||
+                user.username.contains(query, ignoreCase = true) ||
+                user.location.contains(query, ignoreCase = true) ||
+                user.bio.contains(query, ignoreCase = true)
+            val matchesOnline = !showOnlyOnline || user.isOnline
+            matchesQuery && matchesOnline
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("searchable_friends_dialog"),
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.PersonSearch,
+                        contentDescription = null,
+                        tint = BlinkPrimary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Start a Conversation",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = BlinkPrimary.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = "${candidateUsers.size} friends",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BlinkPrimary,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+            ) {
+                // Search input field
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search friends by name, @username...", fontSize = 13.sp) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search friends",
+                            tint = BlinkPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    },
+                    trailingIcon = {
+                        if (query.isNotBlank()) {
+                            IconButton(onClick = { query = "" }) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Clear search",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("search_friends_input")
+                        .testTag("friend_search_bar"),
+                    shape = RoundedCornerShape(14.dp),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = BlinkPrimary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Quick Filter Chips
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = !showOnlyOnline,
+                        onClick = { showOnlyOnline = false },
+                        label = { Text("All (${candidateUsers.size})", fontSize = 11.sp) },
+                        modifier = Modifier.testTag("filter_all_friends")
+                    )
+                    val onlineCount = candidateUsers.count { it.isOnline }
+                    FilterChip(
+                        selected = showOnlyOnline,
+                        onClick = { showOnlyOnline = true },
+                        leadingIcon = {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(BlinkGreen)
+                            )
+                        },
+                        label = { Text("Online ($onlineCount)", fontSize = 11.sp) },
+                        modifier = Modifier.testTag("filter_online_friends")
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (filteredFriends.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.SearchOff,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.size(38.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (query.isNotBlank()) "No friends matching \"$query\"" else "No friends available",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 13.sp,
+                                modifier = Modifier.testTag("no_friends_found_text")
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .testTag("searchable_friends_list"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredFriends, key = { it.id }) { user ->
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onSelectUser(user) }
+                                    .testTag("friend_contact_item_${user.username}"),
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    AvatarBadge(
+                                        name = user.displayName,
+                                        colorHex = user.avatarColorHex,
+                                        size = 44.dp,
+                                        showOnline = true,
+                                        isOnline = user.isOnline
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = user.displayName,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            if (user.isOnline) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "Online",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = BlinkGreen
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "@${user.username} • 📍 ${user.location}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (user.bio.isNotBlank()) {
+                                            Text(
+                                                text = user.bio,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    Button(
+                                        onClick = { onSelectUser(user) },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = BlinkPrimary),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .height(34.dp)
+                                            .testTag("start_chat_button_${user.username}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Chat,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Chat", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("close_friends_dialog_button")
+            ) {
+                Text("Close")
+            }
+        }
+    )
 }

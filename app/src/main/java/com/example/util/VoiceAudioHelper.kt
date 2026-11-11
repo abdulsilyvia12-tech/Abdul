@@ -5,13 +5,15 @@ import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.util.Base64
 import android.util.Log
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.storage.FirebaseStorage
 import com.google.firebase.storage.StorageMetadata
 import java.io.File
 
 /**
- * Handles recording audio voice clips using Android MediaRecorder.
+ * Handles recording audio voice clips using Android MediaRecorder with optimized AAC compression.
  */
 class VoiceRecorderManager(private val context: Context) {
     private var mediaRecorder: MediaRecorder? = null
@@ -37,8 +39,8 @@ class VoiceRecorderManager(private val context: Context) {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(128000)
-                setAudioSamplingRate(44100)
+                setAudioEncodingBitRate(64000)
+                setAudioSamplingRate(24000)
                 setOutputFile(outputFile.absolutePath)
                 prepare()
                 start()
@@ -104,11 +106,13 @@ class VoiceRecorderManager(private val context: Context) {
 }
 
 /**
- * Handles playing audio clips from local files, content URIs, or remote Firebase Storage URLs.
+ * Handles playing audio clips from local files, content URIs, Base64 data URIs, or remote URLs.
  */
 class AudioPlayerManager(private val context: Context) {
     private var mediaPlayer: MediaPlayer? = null
     var currentUri: String? = null
+        private set
+    var isPreparing: Boolean = false
         private set
 
     val isPlaying: Boolean
@@ -117,6 +121,9 @@ class AudioPlayerManager(private val context: Context) {
         } catch (e: Exception) {
             false
         }
+
+    val isPlayingOrPreparing: Boolean
+        get() = isPreparing || isPlaying
 
     val currentPosition: Int
         get() = try {
@@ -141,25 +148,49 @@ class AudioPlayerManager(private val context: Context) {
         try {
             stop()
             currentUri = uriString
+            isPreparing = true
+
+            // Resolve actual playable path: decode Base64 data URI if needed
+            val resolvedPath: String = if (uriString.startsWith("data:audio")) {
+                try {
+                    val base64Data = uriString.substringAfter("base64,")
+                    val audioBytes = Base64.decode(base64Data, Base64.DEFAULT)
+                    val cacheFile = File(context.cacheDir, "voice_cache_${uriString.hashCode().toString().replace("-", "n")}.m4a")
+                    if (!cacheFile.exists() || cacheFile.length() != audioBytes.size.toLong()) {
+                        cacheFile.writeBytes(audioBytes)
+                    }
+                    cacheFile.absolutePath
+                } catch (e: Exception) {
+                    Log.w("AudioPlayerManager", "Failed to decode base64 audio data URI: ${e.message}")
+                    uriString
+                }
+            } else if (uriString.startsWith("file://")) {
+                Uri.parse(uriString).path ?: uriString
+            } else {
+                uriString
+            }
 
             val player = MediaPlayer().apply {
-                if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
-                    setDataSource(uriString)
-                } else if (uriString.startsWith("content://") || uriString.startsWith("file://")) {
-                    setDataSource(context, Uri.parse(uriString))
+                if (resolvedPath.startsWith("http://") || resolvedPath.startsWith("https://")) {
+                    setDataSource(resolvedPath)
+                } else if (resolvedPath.startsWith("content://")) {
+                    setDataSource(context, Uri.parse(resolvedPath))
                 } else {
-                    setDataSource(uriString)
+                    setDataSource(resolvedPath)
                 }
 
                 setOnPreparedListener { mp ->
+                    isPreparing = false
                     mp.start()
                 }
                 setOnCompletionListener {
+                    isPreparing = false
                     stop()
                     onCompletion()
                 }
                 setOnErrorListener { _, what, extra ->
                     Log.w("AudioPlayerManager", "MediaPlayer error: what=$what, extra=$extra")
+                    isPreparing = false
                     stop()
                     onError?.invoke("Playback error ($what, $extra)")
                     true
@@ -168,6 +199,7 @@ class AudioPlayerManager(private val context: Context) {
             }
             mediaPlayer = player
         } catch (e: Exception) {
+            isPreparing = false
             Log.e("AudioPlayerManager", "Failed to start audio playback: ${e.message}", e)
             stop()
             onError?.invoke(e.message ?: "Failed to play audio")
@@ -213,6 +245,7 @@ class AudioPlayerManager(private val context: Context) {
         } catch (e: Exception) {
             Log.w("AudioPlayerManager", "Error stopping player: ${e.message}")
         } finally {
+            isPreparing = false
             mediaPlayer = null
             currentUri = null
         }
@@ -220,7 +253,9 @@ class AudioPlayerManager(private val context: Context) {
 }
 
 /**
- * Uploads audio clips to Firebase Storage under voice_notes/{conversationId}/{messageId}.m4a
+ * Handles uploading or encoding audio clips for Firebase storage and Firestore synchronization.
+ * Uses Base64 Data URI storage when unauthenticated or when Cloud Storage is unprovisioned,
+ * preventing FirebaseNoSignedInUserException and HTTP 404 StorageException errors.
  */
 object FirebaseStorageAudioUploader {
 
@@ -232,33 +267,53 @@ object FirebaseStorageAudioUploader {
         onFailure: (Exception) -> Unit
     ) {
         try {
-            val storage = FirebaseStorage.getInstance()
-            val storageRef = storage.reference
-            val voiceRef = storageRef.child("voice_notes/$conversationId/${messageId}.m4a")
+            // 1. Prepare Base64 Data URI for reliable Firebase Firestore delivery
+            val bytes = audioFile.readBytes()
+            val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            val dataUri = "data:audio/mp4;base64,$base64Data"
 
-            val metadata = StorageMetadata.Builder()
-                .setContentType("audio/mp4")
-                .setCustomMetadata("conversationId", conversationId)
-                .setCustomMetadata("messageId", messageId)
-                .build()
+            // 2. Check if a real authenticated user exists for Firebase Storage
+            val authUser = try {
+                FirebaseAuth.getInstance().currentUser
+            } catch (e: Exception) {
+                null
+            }
 
-            val uploadTask = voiceRef.putFile(Uri.fromFile(audioFile), metadata)
+            // If user is not authenticated with Firebase Auth, do NOT attempt FirebaseStorage
+            // to avoid FirebaseNoSignedInUserException. Directly return dataUri which syncs to Firestore.
+            if (authUser == null) {
+                onSuccess(dataUri)
+                return
+            }
 
-            uploadTask.addOnSuccessListener {
-                voiceRef.downloadUrl.addOnSuccessListener { uri ->
-                    onSuccess(uri.toString())
-                }.addOnFailureListener { e ->
-                    Log.w("AudioUploader", "Upload succeeded but failed to fetch download URL: ${e.message}")
-                    // Fall back to local file URI so playback is never interrupted
-                    onSuccess(Uri.fromFile(audioFile).toString())
-                }
-            }.addOnFailureListener { e ->
-                Log.w("AudioUploader", "Firebase Storage upload failed: ${e.message}. Using local file fallback.")
-                // Local file fallback so user voice note is delivered and playable immediately
-                onSuccess(Uri.fromFile(audioFile).toString())
+            // 3. If authenticated, try Firebase Storage with fallback
+            try {
+                val storage = FirebaseStorage.getInstance()
+                val storageRef = storage.reference
+                val voiceRef = storageRef.child("voice_notes/$conversationId/${messageId}.m4a")
+
+                val metadata = StorageMetadata.Builder()
+                    .setContentType("audio/mp4")
+                    .setCustomMetadata("conversationId", conversationId)
+                    .setCustomMetadata("messageId", messageId)
+                    .build()
+
+                voiceRef.putFile(Uri.fromFile(audioFile), metadata)
+                    .addOnSuccessListener {
+                        voiceRef.downloadUrl.addOnSuccessListener { uri ->
+                            onSuccess(uri.toString())
+                        }.addOnFailureListener {
+                            onSuccess(dataUri)
+                        }
+                    }
+                    .addOnFailureListener {
+                        onSuccess(dataUri)
+                    }
+            } catch (e: Exception) {
+                onSuccess(dataUri)
             }
         } catch (e: Exception) {
-            Log.w("AudioUploader", "Firebase Storage exception: ${e.message}. Using local file fallback.")
+            Log.w("AudioUploader", "Fallback to local file URI: ${e.message}")
             onSuccess(Uri.fromFile(audioFile).toString())
         }
     }

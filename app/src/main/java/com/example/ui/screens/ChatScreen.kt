@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import com.example.util.AudioPlayerManager
 import com.example.util.FirebaseStorageAudioUploader
 import com.example.util.VoiceRecorderManager
+import com.example.ui.components.FullscreenMediaViewer
 import java.io.File
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -171,7 +172,13 @@ fun ChatScreen(
     // Audio playback polling
     LaunchedEffect(playingAudioMessageId) {
         if (playingAudioMessageId != null) {
-            while (playingAudioMessageId != null && audioPlayerManager.isPlaying) {
+            // Wait for player to prepare if needed
+            var waitCounter = 0
+            while (playingAudioMessageId != null && audioPlayerManager.isPreparing && waitCounter < 30) {
+                delay(80)
+                waitCounter++
+            }
+            while (playingAudioMessageId != null && (audioPlayerManager.isPlaying || audioPlayerManager.isPreparing || audioPlayerManager.currentPosition > 0)) {
                 val cur = audioPlayerManager.currentPosition
                 val dur = audioPlayerManager.duration
                 audioCurrentPositionMs = cur
@@ -180,7 +187,7 @@ fun ChatScreen(
                 }
                 delay(100)
             }
-            if (!audioPlayerManager.isPlaying) {
+            if (!audioPlayerManager.isPlaying && !audioPlayerManager.isPreparing) {
                 playingAudioMessageId = null
                 audioPlaybackProgress = 0f
                 audioCurrentPositionMs = 0
@@ -284,7 +291,9 @@ fun ChatScreen(
                         "blinkSecondsRemaining" to (if (isBlinkMode) (if (isVideo) 15 else 10) else 0),
                         "createdAt" to FieldValue.serverTimestamp(),
                         "timestamp" to now,
-                        "timeFormatted" to formattedTimeStr
+                        "timeFormatted" to formattedTimeStr,
+                        "readAt" to null,
+                        "isRead" to false
                     )
                     firestore.collection("messages").document(msgId).set(messagePayload)
                 }
@@ -339,7 +348,9 @@ fun ChatScreen(
                             "blinkSecondsRemaining" to (if (isBlinkMode) (if (isVideo) 15 else 10) else 0),
                             "createdAt" to FieldValue.serverTimestamp(),
                             "timestamp" to now,
-                            "timeFormatted" to formattedTimeStr
+                            "timeFormatted" to formattedTimeStr,
+                            "readAt" to null,
+                            "isRead" to false
                         )
                         firestore.collection("messages").document(msgId).set(messagePayload)
                             .addOnSuccessListener {
@@ -404,6 +415,11 @@ fun ChatScreen(
                                 } else {
                                     emptyMap()
                                 }
+
+                                val readAtTs = doc.getTimestamp("readAt")?.toDate()?.time
+                                    ?: doc.getLong("readAt")
+                                val isRead = (readAtTs != null) || (doc.getBoolean("isRead") ?: false)
+
                                 ChatMessage(
                                     id = id,
                                     conversationId = conversationId,
@@ -416,14 +432,41 @@ fun ChatScreen(
                                     isBlink = isBlink,
                                     blinkSecondsRemaining = blinkSeconds,
                                     isFromMe = (senderId == curUserId),
+                                    isRead = isRead,
+                                    readAt = readAtTs,
                                     reaction = reactionStr ?: parsedReactions.keys.firstOrNull(),
                                     reactions = parsedReactions
                                 )
                             }.sortedBy { it.timestamp }
 
+                            // Update live messages list
                             firestoreMessages = items
                             isFirestoreConnected = true
                             firestoreError = null
+
+                            // When recipient opens the chat or receives messages while viewing,
+                            // automatically update 'readAt' timestamp in Firestore
+                            val unreadIncomingDocs = snapshot.documents.filter { doc ->
+                                val sId = doc.getString("senderId") ?: ""
+                                val rAt = doc.get("readAt")
+                                sId.isNotBlank() && sId != curUserId && rAt == null
+                            }
+                            if (unreadIncomingDocs.isNotEmpty()) {
+                                try {
+                                    val batch = firestore.batch()
+                                    for (doc in unreadIncomingDocs) {
+                                        batch.update(doc.reference, mapOf(
+                                            "readAt" to FieldValue.serverTimestamp(),
+                                            "isRead" to true
+                                        ))
+                                    }
+                                    batch.commit().addOnFailureListener { e ->
+                                        Log.w("ChatScreen", "Failed to mark incoming messages as read: ${e.message}")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w("ChatScreen", "Error updating read status: ${e.message}")
+                                }
+                            }
                         }
                     }
             } catch (e: Exception) {
@@ -534,7 +577,9 @@ fun ChatScreen(
                         "blinkSecondsRemaining" to (if (isBlinkMode) 10 else 0),
                         "createdAt" to FieldValue.serverTimestamp(),
                         "timestamp" to now,
-                        "timeFormatted" to formattedTimeStr
+                        "timeFormatted" to formattedTimeStr,
+                        "readAt" to null,
+                        "isRead" to false
                     )
                     firestore.collection("messages").document(msgId).set(messagePayload)
                         .addOnSuccessListener {
@@ -689,7 +734,9 @@ fun ChatScreen(
                 timeFormatted = formattedTime,
                 isBlink = isBlinkMode,
                 blinkSecondsRemaining = if (isBlinkMode) 15 else 0,
-                isFromMe = true
+                isFromMe = true,
+                isRead = false,
+                readAt = null
             )
             firestoreMessages = (firestoreMessages + optimisticVoiceMsg).sortedBy { it.timestamp }
 
@@ -721,7 +768,9 @@ fun ChatScreen(
                             "blinkSecondsRemaining" to (if (isBlinkMode) 15 else 0),
                             "createdAt" to FieldValue.serverTimestamp(),
                             "timestamp" to now,
-                            "timeFormatted" to formattedTime
+                            "timeFormatted" to formattedTime,
+                            "readAt" to null,
+                            "isRead" to false
                         )
                         firestore?.collection("messages")?.document(msgId)?.set(payload, SetOptions.merge())
                     } catch (e: Exception) {
@@ -1579,7 +1628,7 @@ fun ChatScreen(
 
     // Fullscreen Media Viewer Dialog (Photos and Videos from Firestore / CameraX)
     if (selectedMediaForFullscreen != null) {
-        FullscreenChatMediaDialog(
+        FullscreenMediaViewer(
             message = selectedMediaForFullscreen!!,
             onDismiss = { selectedMediaForFullscreen = null }
         )
@@ -1781,6 +1830,7 @@ fun ChatMessageBubble(
                                     .fillMaxWidth()
                                     .padding(bottom = 6.dp)
                                     .testTag("voice_note_bubble_${message.id}")
+                                    .testTag("audio_message_bubble_${message.id}")
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -1790,7 +1840,7 @@ fun ChatMessageBubble(
                                     IconButton(
                                         onClick = { onToggleAudioPlayback?.invoke(message) },
                                         modifier = Modifier
-                                            .size(38.dp)
+                                            .size(44.dp)
                                             .clip(CircleShape)
                                             .background(
                                                 if (isThisPlaying) BlinkCyan
@@ -1798,12 +1848,14 @@ fun ChatMessageBubble(
                                                 else BlinkPrimary
                                             )
                                             .testTag("voice_play_pause_${message.id}")
+                                            .testTag("audio_playback_button_${message.id}")
+                                            .testTag("audio_playback_button")
                                     ) {
                                         Icon(
                                             imageVector = if (isThisPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                            contentDescription = if (isThisPlaying) "Pause voice note" else "Play voice note",
+                                            contentDescription = if (isThisPlaying) "Pause audio message" else "Play audio message",
                                             tint = if (isThisPlaying) Color.Black else if (isFromMe) BlinkPrimary else Color.White,
-                                            modifier = Modifier.size(20.dp)
+                                            modifier = Modifier.size(22.dp)
                                         )
                                     }
 
@@ -2034,12 +2086,50 @@ fun ChatMessageBubble(
                         )
                         if (isFromMe) {
                             Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Default.DoneAll,
-                                contentDescription = "Delivered",
-                                tint = Color.White.copy(alpha = 0.85f),
-                                modifier = Modifier.size(13.dp)
-                            )
+                            val isMessageRead = (message.readAt != null) || message.isRead
+                            val readTimeFormatted = remember(message.readAt) {
+                                message.readAt?.let {
+                                    SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(it))
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .testTag("chat_message_read_status_${message.id}")
+                                    .testTag("read_status_${message.id}")
+                            ) {
+                                if (isMessageRead) {
+                                    Icon(
+                                        imageVector = Icons.Default.DoneAll,
+                                        contentDescription = "Read at ${readTimeFormatted ?: displayTime}",
+                                        tint = BlinkCyanLight,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text(
+                                        text = if (readTimeFormatted != null) "Read $readTimeFormatted" else "Read",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = BlinkCyanLight,
+                                        modifier = Modifier.testTag("read_status_text_${message.id}")
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Done,
+                                        contentDescription = "Sent",
+                                        tint = Color.White.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text(
+                                        text = "Sent",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Normal,
+                                        color = Color.White.copy(alpha = 0.7f),
+                                        modifier = Modifier.testTag("read_status_text_${message.id}")
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -2125,132 +2215,18 @@ fun ChatMessageBubble(
 }
 
 /**
- * Fullscreen viewer dialog for photos and videos shared in Chat.
+ * Fullscreen viewer dialog for photos and videos shared in Chat,
+ * supporting interactive pinch-to-zoom, pan, double-tap, and playback.
  */
 @Composable
 fun FullscreenChatMediaDialog(
     message: ChatMessage,
     onDismiss: () -> Unit
 ) {
-    var isVideoPlaying by remember { mutableStateOf(true) }
-    val isVideo = message.mediaType.equals("video", ignoreCase = true)
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .testTag("fullscreen_chat_media_dialog")
-        ) {
-            // Main Media Content (Photo or Video)
-            AsyncImage(
-                model = message.mediaUri,
-                contentDescription = if (isVideo) "Fullscreen Video" else "Fullscreen Photo",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable {
-                        if (isVideo) isVideoPlaying = !isVideoPlaying
-                    },
-                contentScale = ContentScale.Fit
-            )
-
-            // Video Play / Pause Center Overlay
-            if (isVideo) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    IconButton(
-                        onClick = { isVideoPlaying = !isVideoPlaying },
-                        modifier = Modifier
-                            .size(72.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.6f))
-                            .border(2.dp, BlinkCyanLight, CircleShape)
-                            .testTag("fullscreen_video_play_toggle")
-                    ) {
-                        Icon(
-                            imageVector = if (isVideoPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isVideoPlaying) "Pause" else "Play",
-                            tint = Color.White,
-                            modifier = Modifier.size(38.dp)
-                        )
-                    }
-                }
-            }
-
-            // Top Header Bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .testTag("fullscreen_media_close_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = Color.White
-                    )
-                }
-
-                Surface(
-                    color = Color.Black.copy(alpha = 0.6f),
-                    shape = RoundedCornerShape(20.dp),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
-                ) {
-                    Text(
-                        text = if (isVideo) "🎬 Video Snap" else "📸 Photo Snap",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.size(44.dp))
-            }
-
-            // Bottom Caption Bar
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(16.dp),
-                shape = RoundedCornerShape(16.dp),
-                color = Color.Black.copy(alpha = 0.75f),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f))
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        text = message.text,
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "${if (message.isFromMe) "You" else message.senderName} • ${message.timeFormatted}",
-                        color = BlinkTextSecondary,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-    }
+    FullscreenMediaViewer(
+        message = message,
+        onDismiss = onDismiss
+    )
 }
 
 /**
