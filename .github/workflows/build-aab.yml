@@ -1,0 +1,132 @@
+name: Build Android AAB
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+env:
+  APP_ID: com.blinkchat.app
+  APP_NAME: Blinkchat
+
+jobs:
+  build-aab:
+    name: Build Android App Bundle (AAB)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect project type (Capacitor vs Native Android)
+        id: project_type
+        run: |
+          if [ -f "package.json" ]; then
+            echo "is_capacitor=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        if: steps.project_type.outputs.is_capacitor == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # --- Capacitor Web + Android AAB Pipeline ---
+      - name: Install dependencies and build web bundle (Capacitor)
+        if: steps.project_type.outputs.is_capacitor == 'true'
+        run: |
+          npm install
+          npm run build
+
+      - name: Initialize & sync Capacitor Android project
+        if: steps.project_type.outputs.is_capacitor == 'true'
+        run: |
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
+            WEB_DIR="dist"
+            if [ -d "build" ] && [ ! -d "dist" ]; then
+              WEB_DIR="build"
+            fi
+            npx cap init "$APP_NAME" "$APP_ID" --web-dir "$WEB_DIR"
+          fi
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Build Android AAB via Capacitor
+        if: steps.project_type.outputs.is_capacitor == 'true'
+        env:
+          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x gradlew
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > app/upload-keystore.jks
+            ./gradlew bundleRelease \
+              -Pandroid.injected.signing.store.file="$(pwd)/app/upload-keystore.jks" \
+              -Pandroid.injected.signing.store.password="${{ secrets.STORE_PASSWORD }}" \
+              -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS || 'upload' }}" \
+              -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
+          else
+            ./gradlew bundleRelease || ./gradlew bundleDebug
+          fi
+
+      # --- Native Android Gradle AAB Fallback (when no package.json exists) ---
+      - name: Setup Gradle (Native Android)
+        if: steps.project_type.outputs.is_capacitor == 'false'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Build Android AAB via Gradle (Native Android)
+        if: steps.project_type.outputs.is_capacitor == 'false'
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ] && [ -n "${{ secrets.STORE_PASSWORD }}" ] && [ -n "${{ secrets.KEY_PASSWORD }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > my-upload-key.jks
+            export KEYSTORE_PATH="$(pwd)/my-upload-key.jks"
+            gradle bundleRelease --no-daemon
+          else
+            echo "Release keystore secrets not set; building debug AAB bundle."
+            gradle bundleDebug --no-daemon
+          fi
+
+      - name: Collect AAB artifact
+        run: |
+          mkdir -p build-aab-artifact
+          if [ -d "android/app/build/outputs/bundle" ]; then
+            find android/app/build/outputs/bundle -name "*.aab" -exec cp {} build-aab-artifact/ \;
+          fi
+          if [ -d "app/build/outputs/bundle" ]; then
+            find app/build/outputs/bundle -name "*.aab" -exec cp {} build-aab-artifact/ \;
+          fi
+          ls -lh build-aab-artifact/
+
+      - name: Upload AAB Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkchat-${{ env.APP_ID }}-aab
+          path: build-aab-artifact/*.aab
+          if-no-files-found: error
+          retention-days: 30
