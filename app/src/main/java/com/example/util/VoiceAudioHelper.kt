@@ -253,7 +253,7 @@ class AudioPlayerManager(private val context: Context) {
 }
 
 /**
- * Handles uploading or encoding audio clips for Firebase storage and Firestore synchronization.
+ * Handles uploading or encoding audio clips for Firebase Storage and Realtime Database synchronization.
  * Uses Base64 Data URI storage when unauthenticated or when Cloud Storage is unprovisioned,
  * preventing FirebaseNoSignedInUserException and HTTP 404 StorageException errors.
  */
@@ -267,7 +267,7 @@ object FirebaseStorageAudioUploader {
         onFailure: (Exception) -> Unit
     ) {
         try {
-            // 1. Prepare Base64 Data URI for reliable Firebase Firestore delivery
+            // 1. Prepare Base64 Data URI for reliable Firebase Realtime Database delivery
             val bytes = audioFile.readBytes()
             val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
             val dataUri = "data:audio/mp4;base64,$base64Data"
@@ -280,7 +280,7 @@ object FirebaseStorageAudioUploader {
             }
 
             // If user is not authenticated with Firebase Auth, do NOT attempt FirebaseStorage
-            // to avoid FirebaseNoSignedInUserException. Directly return dataUri which syncs to Firestore.
+            // to avoid FirebaseNoSignedInUserException. Directly return dataUri which syncs to RTDB.
             if (authUser == null) {
                 onSuccess(dataUri)
                 return

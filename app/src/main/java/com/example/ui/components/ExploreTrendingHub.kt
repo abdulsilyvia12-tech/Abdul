@@ -30,10 +30,8 @@ data class SuggestedCreator(
     val name: String,
     val username: String,
     val avatarColorHex: String,
-    val followersFormatted: String,
     val bio: String,
-    val isVerified: Boolean = true,
-    val isFollowing: Boolean = false
+    val isVerified: Boolean = true
 )
 
 data class TrendingSound(
@@ -49,20 +47,19 @@ fun ExploreTrendingHub(
     onSelectTag: (String?) -> Unit,
     onFollowCreator: (creatorUsername: String) -> Unit,
     onUseTrendingSound: (soundTitle: String) -> Unit,
+    followingUsernames: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     val trendingHashtags = remember {
         listOf("all", "phonk", "erastour", "cyberpunk", "london", "tokyodrift", "cinematic", "skate", "vibes")
     }
 
-    var suggestedCreators by remember {
-        mutableStateOf(
-            listOf(
-                SuggestedCreator("c_1", "Kai Storm", "kaistorm", "#06B6D4", "12.4K", "Phonk producer & visualizer ⚡", isVerified = true, isFollowing = false),
-                SuggestedCreator("c_2", "Maya Lin", "mayalin", "#EC4899", "28.1K", "Tokyo neon aesthetic & DJ sets ✨", isVerified = true, isFollowing = true),
-                SuggestedCreator("c_3", "Zane Vance", "zanevance", "#10B981", "9.8K", "Synthwave & cyber photography 🌆", isVerified = true, isFollowing = false),
-                SuggestedCreator("c_4", "Elena Vance", "elenavance", "#8B5CF6", "15.3K", "Visual effects & street style 🎨", isVerified = false, isFollowing = false)
-            )
+    val suggestedCreators = remember {
+        listOf(
+            SuggestedCreator("c_1", "Kai Storm", "kai_storm", "#06B6D4", "Phonk producer & visualizer ⚡", isVerified = true),
+            SuggestedCreator("c_2", "Maya Lin", "maya_lin", "#EC4899", "Tokyo neon aesthetic & DJ sets ✨", isVerified = true),
+            SuggestedCreator("c_3", "Zane Flux", "zane_flux", "#10B981", "Synthwave & cyber photography 🌆", isVerified = true),
+            SuggestedCreator("c_4", "Elena Vance", "elena_v", "#8B5CF6", "Visual effects & street style 🎨", isVerified = false)
         )
     }
 
@@ -222,22 +219,21 @@ fun ExploreTrendingHub(
                         )
 
                         Text(
-                            text = "${creator.followersFormatted} followers",
+                            text = creator.bio,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = BlinkPrimaryLight,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(vertical = 4.dp)
                         )
 
+                        val isFollowing = followingUsernames.any { it.equals(creator.username, ignoreCase = true) }
                         Button(
                             onClick = {
-                                suggestedCreators = suggestedCreators.map {
-                                    if (it.id == creator.id) it.copy(isFollowing = !it.isFollowing) else it
-                                }
                                 onFollowCreator(creator.username)
                             },
                             shape = RoundedCornerShape(12.dp),
-                            colors = if (creator.isFollowing) {
+                            colors = if (isFollowing) {
                                 ButtonDefaults.outlinedButtonColors()
                             } else {
                                 ButtonDefaults.buttonColors(containerColor = BlinkPrimary)
@@ -245,11 +241,11 @@ fun ExploreTrendingHub(
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(28.dp)
+                                .height(30.dp)
                                 .testTag("follow_toggle_${creator.username}")
                         ) {
                             Text(
-                                text = if (creator.isFollowing) "Following" else "Follow +",
+                                text = if (isFollowing) "Following" else "Follow +",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold
                             )

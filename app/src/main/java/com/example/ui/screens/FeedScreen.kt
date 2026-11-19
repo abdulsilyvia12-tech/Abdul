@@ -62,7 +62,8 @@ fun FeedScreen(
     onCreatePostClick: () -> Unit,
     onBlockUser: (User) -> Unit,
     onReportPost: (postId: String, authorName: String) -> Unit,
-    onUseTrendingSound: (String) -> Unit = {}
+    onUseTrendingSound: (String) -> Unit = {},
+    followingUsernames: Set<String> = emptySet()
 ) {
     var activeCommentPostId by remember { mutableStateOf<String?>(null) }
     var reportingPost by remember { mutableStateOf<Post?>(null) }
@@ -278,7 +279,8 @@ fun FeedScreen(
                     selectedTag = selectedHashtag,
                     onSelectTag = { tag -> selectedHashtag = tag },
                     onFollowCreator = onFollowCreator,
-                    onUseTrendingSound = onUseTrendingSound
+                    onUseTrendingSound = onUseTrendingSound,
+                    followingUsernames = followingUsernames
                 )
                 Spacer(modifier = Modifier.height(10.dp))
             }

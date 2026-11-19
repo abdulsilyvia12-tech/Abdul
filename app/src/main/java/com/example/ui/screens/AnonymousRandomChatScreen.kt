@@ -180,7 +180,7 @@ fun AnonymousRandomChatScreen(
                                 )
                             }
                             Text(
-                                text = "Anonymous • Connected via Firestore",
+                                text = "Anonymous • Connected via Realtime Database",
                                 fontSize = 11.sp,
                                 color = BlinkCyanLight
                             )

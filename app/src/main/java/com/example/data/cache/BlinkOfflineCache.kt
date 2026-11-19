@@ -43,6 +43,8 @@ class BlinkOfflineCache(private val context: Context) {
                     put("streaksCount", currentUser.streaksCount)
                     put("postsCount", currentUser.postsCount)
                     put("friendsCount", currentUser.friendsCount)
+                    put("followersCount", currentUser.followersCount)
+                    put("followingCount", currentUser.followingCount)
                     put("statusText", currentUser.statusText)
                     put("location", currentUser.location)
                     put("coordinates", currentUser.coordinates)
@@ -124,6 +126,65 @@ class BlinkOfflineCache(private val context: Context) {
             }
             root.put("payments", paymentsArray)
 
+            // Save conversations
+            val convsArray = JSONArray()
+            for (conv in conversations) {
+                val cObj = JSONObject().apply {
+                    put("id", conv.id)
+                    put("participantId", conv.participantId)
+                    put("name", conv.name)
+                    put("username", conv.username)
+                    put("avatarColorHex", conv.avatarColorHex)
+                    put("lastMessage", conv.lastMessage)
+                    put("lastMessageTime", conv.lastMessageTime)
+                    put("unreadCount", conv.unreadCount)
+                    put("isAiBot", conv.isAiBot)
+                    put("streak", conv.streak)
+                    put("isOnline", conv.isOnline)
+                    put("isBlinkActive", conv.isBlinkActive)
+                    put("isGroup", conv.isGroup)
+                    put("groupTitle", conv.groupTitle ?: "")
+                    put("groupMembers", JSONArray(conv.groupMembers))
+                    put("memberNames", JSONArray(conv.memberNames))
+                }
+                convsArray.put(cObj)
+            }
+            root.put("conversations", convsArray)
+
+            // Save messages grouped by conversationId
+            val messagesObj = JSONObject()
+            for ((convId, msgList) in messages) {
+                val msgArr = JSONArray()
+                for (m in msgList.takeLast(200)) {
+                    val mObj = JSONObject().apply {
+                        put("id", m.id)
+                        put("conversationId", m.conversationId)
+                        put("senderId", m.senderId)
+                        put("senderName", m.senderName)
+                        put("text", m.text)
+                        put("mediaUri", m.mediaUri ?: "")
+                        put("mediaType", m.mediaType)
+                        put("timestamp", m.timestamp)
+                        put("timeFormatted", m.timeFormatted)
+                        put("isBlink", m.isBlink)
+                        put("blinkSecondsRemaining", m.blinkSecondsRemaining)
+                        put("isRead", m.isRead)
+                        put("isExpired", m.isExpired)
+                        put("isFromMe", m.isFromMe)
+                        put("reaction", m.reaction ?: "")
+                        if (m.readAt != null) put("readAt", m.readAt)
+                        val reactJson = JSONObject()
+                        m.reactions.forEach { (emoji, users) ->
+                            reactJson.put(emoji, JSONArray(users))
+                        }
+                        put("reactions", reactJson)
+                    }
+                    msgArr.put(mObj)
+                }
+                messagesObj.put(convId, msgArr)
+            }
+            root.put("messages", messagesObj)
+
             // Write to local cache file
             cacheFile.writeText(root.toString())
             prefs.edit().putLong("last_cached_timestamp", System.currentTimeMillis()).apply()
@@ -146,9 +207,11 @@ class BlinkOfflineCache(private val context: Context) {
                 email = u.getString("email"),
                 avatarColorHex = u.optString("avatarColorHex", "#8B5CF6"),
                 bio = u.optString("bio", ""),
-                streaksCount = u.optInt("streaksCount", 10),
-                postsCount = u.optInt("postsCount", 5),
-                friendsCount = u.optInt("friendsCount", 100),
+                streaksCount = u.optInt("streaksCount", 0),
+                postsCount = u.optInt("postsCount", 0),
+                friendsCount = u.optInt("friendsCount", 0),
+                followersCount = u.optInt("followersCount", 0),
+                followingCount = u.optInt("followingCount", 0),
                 statusText = u.optString("statusText", "Available ⚡"),
                 location = u.optString("location", "Tokyo, Japan"),
                 coordinates = u.optString("coordinates", "35.6762° N, 139.6503° E"),
@@ -267,6 +330,113 @@ class BlinkOfflineCache(private val context: Context) {
                 )
             }
             if (list.isNotEmpty()) list else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun loadCachedConversations(): List<Conversation>? {
+        if (!cacheFile.exists()) return null
+        return try {
+            val root = JSONObject(cacheFile.readText())
+            if (!root.has("conversations")) return null
+            val arr = root.getJSONArray("conversations")
+            val list = mutableListOf<Conversation>()
+            for (i in 0 until arr.length()) {
+                val c = arr.getJSONObject(i)
+                val membersArr = c.optJSONArray("groupMembers")
+                val members = mutableListOf<String>()
+                if (membersArr != null) {
+                    for (j in 0 until membersArr.length()) members.add(membersArr.getString(j))
+                }
+                val namesArr = c.optJSONArray("memberNames")
+                val names = mutableListOf<String>()
+                if (namesArr != null) {
+                    for (j in 0 until namesArr.length()) names.add(namesArr.getString(j))
+                }
+                val groupTitleRaw = c.optString("groupTitle", "")
+                list.add(
+                    Conversation(
+                        id = c.getString("id"),
+                        participantId = c.optString("participantId", c.getString("id")),
+                        name = c.getString("name"),
+                        username = c.optString("username", ""),
+                        avatarColorHex = c.optString("avatarColorHex", "#8B5CF6"),
+                        lastMessage = c.optString("lastMessage", ""),
+                        lastMessageTime = c.optString("lastMessageTime", "Just now"),
+                        unreadCount = c.optInt("unreadCount", 0),
+                        isAiBot = c.optBoolean("isAiBot", false),
+                        streak = c.optInt("streak", 0),
+                        isOnline = c.optBoolean("isOnline", false),
+                        isBlinkActive = c.optBoolean("isBlinkActive", false),
+                        isGroup = c.optBoolean("isGroup", false),
+                        groupTitle = groupTitleRaw.ifBlank { null },
+                        groupMembers = members,
+                        memberNames = names
+                    )
+                )
+            }
+            if (list.isNotEmpty()) list else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun loadCachedMessages(): Map<String, List<ChatMessage>>? {
+        if (!cacheFile.exists()) return null
+        return try {
+            val root = JSONObject(cacheFile.readText())
+            if (!root.has("messages")) return null
+            val obj = root.getJSONObject("messages")
+            val result = mutableMapOf<String, List<ChatMessage>>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val convId = keys.next()
+                val arr = obj.getJSONArray(convId)
+                val list = mutableListOf<ChatMessage>()
+                for (i in 0 until arr.length()) {
+                    val m = arr.getJSONObject(i)
+                    val mediaUriRaw = m.optString("mediaUri", "")
+                    val reactionRaw = m.optString("reaction", "")
+                    val reactJson = m.optJSONObject("reactions")
+                    val reactionsMap = mutableMapOf<String, List<String>>()
+                    if (reactJson != null) {
+                        val rKeys = reactJson.keys()
+                        while (rKeys.hasNext()) {
+                            val emoji = rKeys.next()
+                            val uArr = reactJson.optJSONArray(emoji)
+                            val users = mutableListOf<String>()
+                            if (uArr != null) {
+                                for (k in 0 until uArr.length()) users.add(uArr.getString(k))
+                            }
+                            if (users.isNotEmpty()) reactionsMap[emoji] = users
+                        }
+                    }
+                    list.add(
+                        ChatMessage(
+                            id = m.getString("id"),
+                            conversationId = m.optString("conversationId", convId),
+                            senderId = m.optString("senderId", ""),
+                            senderName = m.optString("senderName", ""),
+                            text = m.optString("text", ""),
+                            mediaUri = mediaUriRaw.ifBlank { null },
+                            mediaType = m.optString("mediaType", "none"),
+                            timestamp = m.optLong("timestamp", System.currentTimeMillis()),
+                            timeFormatted = m.optString("timeFormatted", "Just now"),
+                            isBlink = m.optBoolean("isBlink", false),
+                            blinkSecondsRemaining = m.optInt("blinkSecondsRemaining", 10),
+                            isRead = m.optBoolean("isRead", false),
+                            isExpired = m.optBoolean("isExpired", false),
+                            isFromMe = m.optBoolean("isFromMe", false),
+                            reaction = reactionRaw.ifBlank { null },
+                            reactions = reactionsMap,
+                            readAt = if (m.has("readAt")) m.optLong("readAt") else null
+                        )
+                    )
+                }
+                result[convId] = list
+            }
+            if (result.isNotEmpty()) result else null
         } catch (e: Exception) {
             null
         }

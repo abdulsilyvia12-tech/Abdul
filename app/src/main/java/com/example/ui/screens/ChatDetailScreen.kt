@@ -144,6 +144,18 @@ fun ChatDetailScreen(
                         ) {
                             Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = BlinkPrimaryLight)
                         }
+                        IconButton(
+                            onClick = onReportUser,
+                            modifier = Modifier.testTag("chat_report_button")
+                        ) {
+                            Icon(Icons.Default.Report, contentDescription = "Report User", tint = BlinkAmber)
+                        }
+                        IconButton(
+                            onClick = onBlockUser,
+                            modifier = Modifier.testTag("chat_block_button")
+                        ) {
+                            Icon(Icons.Default.Block, contentDescription = "Block User", tint = BlinkPink)
+                        }
                     }
 
                     Box {

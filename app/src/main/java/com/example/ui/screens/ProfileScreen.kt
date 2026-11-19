@@ -63,6 +63,9 @@ fun ProfileScreen(
     onUpdateLocation: ((String, String) -> Unit)? = null,
     onUpdateDressing: ((outfitName: String, outfitEmoji: String, headwear: String, accessory: String, auraGlow: String, bannerTheme: String, vipBadge: String, avatarColorHex: String, newLevel: Int, newXp: Int) -> Unit)? = null,
     friendRequests: List<com.example.data.model.FriendRequest> = emptyList(),
+    followers: List<User> = emptyList(),
+    following: List<User> = emptyList(),
+    onToggleFollowUser: ((User) -> Unit)? = null,
     onSearchUsers: ((String) -> List<User>)? = null,
     onSendFriendRequest: ((User) -> Boolean)? = null,
     onAcceptFriendRequest: ((String) -> Boolean)? = null,
@@ -82,22 +85,39 @@ fun ProfileScreen(
     var isDetectingLocation by remember { mutableStateOf(false) }
     var customCityInput by remember { mutableStateOf("") }
 
-    val sampleFollowers = remember {
-        listOf(
-            SocialUserItem("u_1", "Maya Lin", "mayalin", "#EC4899", "Tokyo aesthetic & DJ sets ✨", isVerified = true, isFollowing = true),
-            SocialUserItem("u_2", "Kai Storm", "kaistorm", "#06B6D4", "Phonk producer & speed enthusiast ⚡", isVerified = true, isFollowing = true),
-            SocialUserItem("u_3", "Zane Vance", "zanevance", "#10B981", "Synthwave artist 🌆", isVerified = true, isFollowing = false),
-            SocialUserItem("u_4", "Elena Vance", "elenavance", "#8B5CF6", "Visual effects & street style 🎨", isVerified = false, isFollowing = false),
-            SocialUserItem("u_5", "Liam Harper", "liamharper", "#F59E0B", "Film skater London 🛹", isVerified = false, isFollowing = true)
-        )
+    val myPosts = remember(userPosts, user.id) {
+        userPosts.filter { it.authorId == user.id }
     }
 
-    val sampleFollowing = remember {
-        listOf(
-            SocialUserItem("u_1", "Maya Lin", "mayalin", "#EC4899", "Tokyo aesthetic & DJ sets ✨", isVerified = true, isFollowing = true),
-            SocialUserItem("u_2", "Kai Storm", "kaistorm", "#06B6D4", "Phonk producer & speed enthusiast ⚡", isVerified = true, isFollowing = true),
-            SocialUserItem("u_5", "Liam Harper", "liamharper", "#F59E0B", "Film skater London 🛹", isVerified = false, isFollowing = true)
-        )
+    val followingUserIds = remember(following) { following.map { it.id }.toSet() }
+    val followingUsernames = remember(following) { following.map { it.username.lowercase() }.toSet() }
+
+    val realFollowerItems = remember(followers, followingUserIds, followingUsernames) {
+        followers.map { f ->
+            SocialUserItem(
+                id = f.id,
+                name = f.displayName,
+                username = f.username,
+                avatarColorHex = f.avatarColorHex,
+                bio = f.bio,
+                isVerified = f.isVerified,
+                isFollowing = f.id in followingUserIds || f.username.lowercase() in followingUsernames
+            )
+        }
+    }
+
+    val realFollowingItems = remember(following) {
+        following.map { f ->
+            SocialUserItem(
+                id = f.id,
+                name = f.displayName,
+                username = f.username,
+                avatarColorHex = f.avatarColorHex,
+                bio = f.bio,
+                isVerified = f.isVerified,
+                isFollowing = true
+            )
+        }
     }
 
     // Edit fields
@@ -500,7 +520,7 @@ fun ProfileScreen(
                         .testTag("stat_followers_count")
                 ) {
                     Text(
-                        text = "${user.followersCount}",
+                        text = "${followers.size}",
                         fontWeight = FontWeight.Black,
                         fontSize = 17.sp,
                         color = BlinkCyanLight
@@ -522,7 +542,7 @@ fun ProfileScreen(
                         .testTag("stat_following_count")
                 ) {
                     Text(
-                        text = "${user.followingCount}",
+                        text = "${following.size}",
                         fontWeight = FontWeight.Black,
                         fontSize = 17.sp,
                         color = BlinkPrimaryLight
@@ -539,7 +559,7 @@ fun ProfileScreen(
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "${user.postsCount}",
+                        text = "${myPosts.size}",
                         fontWeight = FontWeight.Black,
                         fontSize = 17.sp,
                         color = BlinkPinkLight
@@ -773,7 +793,7 @@ fun ProfileScreen(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "${userPosts.filter { it.authorId == user.id }.size} posts",
+                text = "${myPosts.size} posts",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -781,7 +801,6 @@ fun ProfileScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        val myPosts = userPosts.filter { it.authorId == user.id }
         if (myPosts.isEmpty()) {
             Box(
                 modifier = Modifier
@@ -1111,8 +1130,22 @@ fun ProfileScreen(
     // --- Interactive Followers Showcase Dialog ---
     if (showFollowersDialog) {
         FollowersListDialog(
-            title = "Followers (${user.followersCount})",
-            initialUsers = sampleFollowers,
+            title = "Followers (${followers.size})",
+            initialUsers = realFollowerItems,
+            emptyTitle = "No followers yet",
+            emptySubtitle = "Share Blinks and connect with friends to grow your real follower list.",
+            onToggleFollow = { item ->
+                val targetUser = followers.find { it.id == item.id } ?: User(
+                    id = item.id,
+                    username = item.username,
+                    displayName = item.name,
+                    email = "${item.username}@blinkchat.com",
+                    avatarColorHex = item.avatarColorHex,
+                    bio = item.bio,
+                    isVerified = item.isVerified
+                )
+                onToggleFollowUser?.invoke(targetUser)
+            },
             onDismiss = { showFollowersDialog = false }
         )
     }
@@ -1120,8 +1153,22 @@ fun ProfileScreen(
     // --- Interactive Following Showcase Dialog ---
     if (showFollowingDialog) {
         FollowersListDialog(
-            title = "Following (${user.followingCount})",
-            initialUsers = sampleFollowing,
+            title = "Following (${following.size})",
+            initialUsers = realFollowingItems,
+            emptyTitle = "Not following anyone yet",
+            emptySubtitle = "Follow creators in Home or connect with friends to see them here.",
+            onToggleFollow = { item ->
+                val targetUser = following.find { it.id == item.id } ?: User(
+                    id = item.id,
+                    username = item.username,
+                    displayName = item.name,
+                    email = "${item.username}@blinkchat.com",
+                    avatarColorHex = item.avatarColorHex,
+                    bio = item.bio,
+                    isVerified = item.isVerified
+                )
+                onToggleFollowUser?.invoke(targetUser)
+            },
             onDismiss = { showFollowingDialog = false }
         )
     }

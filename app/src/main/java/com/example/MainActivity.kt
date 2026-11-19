@@ -53,8 +53,19 @@ fun BlinkApp(repository: BlinkRepository) {
     val videos by repository.videos.collectAsStateWithLifecycle()
     val friendRequests by repository.friendRequests.collectAsStateWithLifecycle()
     val notifications by repository.notifications.collectAsStateWithLifecycle()
+    val followers by repository.followers.collectAsStateWithLifecycle()
+    val following by repository.following.collectAsStateWithLifecycle()
 
-    // Real-Time Anonymous Random Matching & Chat State (Firestore Powered)
+    val blockedUserIds = remember(blockedUsers) { blockedUsers.map { it.userId }.toSet() }
+    val blockedUsernames = remember(blockedUsers) { blockedUsers.map { it.username.lowercase() }.toSet() }
+    val unblockedUsers = remember(allUsers, blockedUserIds, blockedUsernames) {
+        allUsers.filter { it.id !in blockedUserIds && it.username.lowercase() !in blockedUsernames }
+    }
+    val followingUsernames = remember(following) {
+        following.map { it.username.lowercase() }.toSet()
+    }
+
+    // Real-Time Anonymous Random Matching & Chat State (Firebase Realtime Database Powered)
     val randomMatchState by repository.randomMatchState.collectAsStateWithLifecycle()
     val activeRandomChat by repository.activeRandomChat.collectAsStateWithLifecycle()
     val randomChatMessages by repository.randomChatMessages.collectAsStateWithLifecycle()
@@ -199,7 +210,7 @@ fun BlinkApp(repository: BlinkRepository) {
         return
     }
 
-    // --- Fullscreen Chat Screen Overlay (Live Firestore Synchronized) ---
+    // --- Fullscreen Chat Screen Overlay (Live Realtime Database Synchronized) ---
     if (activeConversation != null) {
         BackHandler {
             activeConversation = null
@@ -282,7 +293,7 @@ fun BlinkApp(repository: BlinkRepository) {
                 BlinkTab.LOCATION -> {
                     LocationScreen(
                         currentUser = currentUser,
-                        friends = allUsers.filter { it.id != currentUser?.id },
+                        friends = unblockedUsers.filter { it.id != currentUser?.id },
                         onUpdateLocation = { locName, coords ->
                             repository.updateUserLocation(locName, coords)
                         },
@@ -295,23 +306,7 @@ fun BlinkApp(repository: BlinkRepository) {
                             )
                         },
                         onStartChat = { friend ->
-                            val existing = conversations.find { it.participantId == friend.id }
-                            if (existing != null) {
-                                activeConversation = existing
-                            } else {
-                                val newConv = Conversation(
-                                    id = "conv_" + friend.id,
-                                    participantId = friend.id,
-                                    name = friend.displayName,
-                                    username = friend.username,
-                                    avatarColorHex = friend.avatarColorHex,
-                                    lastMessage = "Started location chat 📍",
-                                    lastMessageTime = "Just now",
-                                    unreadCount = 0,
-                                    isOnline = friend.isOnline
-                                )
-                                activeConversation = newConv
-                            }
+                            activeConversation = repository.getOrCreateDirectChat(friend)
                         }
                     )
                 }
@@ -346,7 +341,8 @@ fun BlinkApp(repository: BlinkRepository) {
                         },
                         onUseTrendingSound = { soundTitle ->
                             currentTab = BlinkTab.CAMERA
-                        }
+                        },
+                        followingUsernames = followingUsernames
                     )
                 }
 
@@ -377,57 +373,26 @@ fun BlinkApp(repository: BlinkRepository) {
                 BlinkTab.CHATS -> {
                     ChatListScreen(
                         conversations = conversations,
-                        allUsers = allUsers,
+                        allUsers = unblockedUsers,
                         currentUser = currentUser,
                         onSelectConversation = { conv ->
                             activeConversation = conv
                         },
                         onStartNewChat = { targetUser ->
-                            val existing = conversations.find { it.participantId == targetUser.id }
-                            if (existing != null) {
-                                activeConversation = existing
-                            } else {
-                                val newConv = Conversation(
-                                    id = "conv_" + targetUser.id,
-                                    participantId = targetUser.id,
-                                    name = targetUser.displayName,
-                                    username = targetUser.username,
-                                    avatarColorHex = targetUser.avatarColorHex,
-                                    lastMessage = "Started chat ⚡",
-                                    lastMessageTime = "Just now",
-                                    unreadCount = 0,
-                                    isOnline = targetUser.isOnline
-                                )
-                                activeConversation = newConv
-                            }
+                            activeConversation = repository.getOrCreateDirectChat(targetUser)
                         },
                         onCreateGroupChat = { groupTitle, memberIds ->
                             val createdGroup = repository.createGroupChat(groupTitle, memberIds)
                             activeConversation = createdGroup
                         },
                         onAcceptRequest = { user ->
-                            val existing = conversations.find { it.participantId == user.id }
-                            if (existing != null) {
-                                activeConversation = existing
-                            } else {
-                                val newConv = Conversation(
-                                    id = "conv_" + user.id,
-                                    participantId = user.id,
-                                    name = user.displayName,
-                                    username = user.username,
-                                    avatarColorHex = user.avatarColorHex,
-                                    lastMessage = "Connected as friends ⚡",
-                                    lastMessageTime = "Just now",
-                                    unreadCount = 0,
-                                    isOnline = user.isOnline
-                                )
-                                activeConversation = newConv
-                            }
+                            activeConversation = repository.getOrCreateDirectChat(user)
                         },
                         onBlockUser = { user ->
                             repository.blockUser(user)
                         },
                         friendRequests = friendRequests,
+                        blockedUsers = blockedUsers,
                         onSearchUsers = { query -> repository.searchUsers(query) },
                         onSendFriendRequest = { targetUser -> repository.sendFriendRequest(targetUser) },
                         onAcceptFriendRequest = { reqId -> repository.acceptFriendRequest(reqId) },
@@ -474,6 +439,9 @@ fun BlinkApp(repository: BlinkRepository) {
                                 repository.updateDressingAndUpgrade(outfitName, outfitEmoji, headwear, accessory, auraGlow, bannerTheme, vipBadge, avatarColorHex, newLevel, newXp)
                             },
                             friendRequests = friendRequests,
+                            followers = followers,
+                            following = following,
+                            onToggleFollowUser = { targetUser -> repository.toggleFollowUser(targetUser) },
                             onSearchUsers = { query -> repository.searchUsers(query) },
                             onSendFriendRequest = { targetUser -> repository.sendFriendRequest(targetUser) },
                             onAcceptFriendRequest = { reqId -> repository.acceptFriendRequest(reqId) },

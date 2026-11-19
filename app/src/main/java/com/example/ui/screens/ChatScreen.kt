@@ -62,17 +62,19 @@ import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.ai.BlinkAiService
 import com.example.data.ai.ChatSummaryResult
+import com.example.data.firebase.FirebaseRtdbManager
 import com.example.data.model.ChatMessage
 import com.example.data.model.Conversation
 import com.example.data.model.User
 import com.example.data.repository.BlinkRepository
 import com.example.ui.components.AvatarBadge
+import com.example.ui.components.BlockConfirmDialog
+import com.example.ui.components.ReportDialog
 import com.example.ui.components.camera.CameraXPreviewCapture
 import com.example.ui.theme.*
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.SetOptions
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -80,7 +82,7 @@ import java.util.*
 
 /**
  * ChatScreen component built with Jetpack Compose.
- * Displays a real-time list of messages synchronized with Cloud Firestore
+ * Displays a real-time list of messages synchronized with Firebase Realtime Database
  * and provides a rich text input field for composing and sending new messages.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,25 +102,15 @@ fun ChatScreen(
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    // Firestore instance resolution
-    val firestore = remember {
-        repository?.firestore ?: try {
-            val dbId = context.getString(R.string.firestore_database_id)
-            if (dbId.isNotBlank()) {
-                FirebaseFirestore.getInstance(dbId)
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.w("ChatScreen", "Failed to get Firestore instance with databaseId: ${e.message}")
-            null
-        }
+    // Firebase Realtime Database instance resolution
+    val rtdb = remember {
+        repository?.realtimeDb ?: FirebaseRtdbManager.getDatabase(context)
     }
 
-    // State for Firestore live messages
-    var firestoreMessages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var isFirestoreConnected by remember { mutableStateOf(false) }
-    var firestoreError by remember { mutableStateOf<String?>(null) }
+    // State for Realtime Database live messages
+    var rtdbMessages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var isRtdbConnected by remember { mutableStateOf(false) }
+    var rtdbError by remember { mutableStateOf<String?>(null) }
 
     // State for local repository fallback messages
     val repoMessagesMap by repository?.messages?.collectAsStateWithLifecycle() ?: remember { mutableStateOf(emptyMap()) }
@@ -131,6 +123,33 @@ fun ChatScreen(
     var isCameraSnapOpen by remember { mutableStateOf(false) }
     var selectedMediaForFullscreen by remember { mutableStateOf<ChatMessage?>(null) }
     var selectedMessageForReaction by remember { mutableStateOf<ChatMessage?>(null) }
+    var showReportDialog by remember { mutableStateOf(false) }
+    var showBlockDialog by remember { mutableStateOf(false) }
+
+    val blockedUsers by repository?.blockedUsers?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyList()) }
+    val allUsers by repository?.allUsers?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyList()) }
+
+    val isAiChat = remember(conversationId, recipientUsername) {
+        conversationId == "conv_ai" || recipientUsername.equals("blink_ai", ignoreCase = true)
+    }
+    val recipientUser = remember(allUsers, recipientUsername, conversationTitle, recipientAvatarColorHex, isRecipientOnline) {
+        allUsers.find { it.username.equals(recipientUsername, ignoreCase = true) }
+            ?: User(
+                id = "user_$recipientUsername",
+                username = recipientUsername,
+                displayName = conversationTitle,
+                email = "$recipientUsername@blinkchat.com",
+                avatarColorHex = recipientAvatarColorHex,
+                isOnline = isRecipientOnline
+            )
+    }
+    val isRecipientBlocked = remember(blockedUsers, recipientUser.id, recipientUsername) {
+        blockedUsers.any {
+            it.userId == recipientUser.id || it.username.equals(recipientUsername, ignoreCase = true)
+        }
+    }
 
     // Voice audio recording & playback managers
     val voiceRecorderManager = remember { VoiceRecorderManager(context) }
@@ -195,7 +214,7 @@ fun ChatScreen(
         }
     }
 
-    // Real-time typing indicators synced with Cloud Firestore
+    // Real-time typing indicators synced with Firebase Realtime Database
     var typingUsers by remember { mutableStateOf<List<String>>(emptyList()) }
     val isOtherParticipantTyping = typingUsers.isNotEmpty()
     val typingDisplayName = remember(typingUsers, recipientUsername, conversationTitle) {
@@ -207,16 +226,21 @@ fun ChatScreen(
         }
     }
 
-    // Sync local user typing status to Firestore
+    // Sync local user typing status to Realtime Database under chats/{chatId}/typing/{userId}
     LaunchedEffect(inputText, conversationId) {
         val curUserId = currentUser?.id ?: "user_me"
         val curUserName = currentUser?.displayName ?: "Alex Rivers"
-        val indicatorDocId = "${conversationId}_${curUserId}"
+        val safeChatKey = FirebaseRtdbManager.sanitizeKey(conversationId)
+        val safeUserKey = FirebaseRtdbManager.sanitizeKey(curUserId)
 
-        if (firestore != null) {
+        if (rtdb != null) {
             val isTypingNow = inputText.trim().isNotEmpty()
+            val typingRef = FirebaseRtdbManager.chatsRef(rtdb)
+                .child(safeChatKey)
+                .child("typing")
+                .child(safeUserKey)
             try {
-                firestore.collection("typing_indicators").document(indicatorDocId).set(
+                typingRef.setValue(
                     hashMapOf(
                         "conversationId" to conversationId,
                         "userId" to curUserId,
@@ -226,14 +250,13 @@ fun ChatScreen(
                     )
                 )
             } catch (e: Exception) {
-                Log.w("ChatScreen", "Failed to update typing status in Firestore: ${e.message}")
+                Log.w("ChatScreen", "Failed to update typing status in RTDB: ${e.message}")
             }
 
             if (isTypingNow) {
-                // Auto-clear typing status after 3.5 seconds of user idle
                 delay(3500)
                 try {
-                    firestore.collection("typing_indicators").document(indicatorDocId).set(
+                    typingRef.setValue(
                         hashMapOf(
                             "conversationId" to conversationId,
                             "userId" to curUserId,
@@ -242,9 +265,7 @@ fun ChatScreen(
                             "updatedAt" to System.currentTimeMillis()
                         )
                     )
-                } catch (e: Exception) {
-                    // Ignore
-                }
+                } catch (_: Exception) {}
             }
         }
     }
@@ -274,31 +295,30 @@ fun ChatScreen(
                 text = defaultText,
                 isBlink = isBlinkMode,
                 mediaType = mediaType,
-                mediaUri = uri.toString()
+                mediaUri = uri.toString(),
+                messageId = msgId
             )
 
-            try {
-                if (firestore != null) {
-                    val messagePayload = hashMapOf(
-                        "id" to msgId,
-                        "conversationId" to conversationId,
-                        "senderId" to curUserId,
-                        "senderName" to curUserName,
-                        "text" to defaultText,
-                        "mediaUri" to uri.toString(),
-                        "mediaType" to mediaType,
-                        "isBlink" to isBlinkMode,
-                        "blinkSecondsRemaining" to (if (isBlinkMode) (if (isVideo) 15 else 10) else 0),
-                        "createdAt" to FieldValue.serverTimestamp(),
-                        "timestamp" to now,
-                        "timeFormatted" to formattedTimeStr,
-                        "readAt" to null,
-                        "isRead" to false
+            if (repository == null && rtdb != null) {
+                try {
+                    val messagePayload = FirebaseRtdbManager.messageToMap(
+                        msgId = msgId,
+                        conversationId = conversationId,
+                        senderId = curUserId,
+                        senderName = curUserName,
+                        text = defaultText,
+                        mediaUri = uri.toString(),
+                        mediaType = mediaType,
+                        isBlink = isBlinkMode,
+                        blinkSecondsRemaining = if (isBlinkMode) (if (isVideo) 15 else 10) else 0,
+                        timestamp = now,
+                        timeFormatted = formattedTimeStr
                     )
-                    firestore.collection("messages").document(msgId).set(messagePayload)
+                    FirebaseRtdbManager.chatMessagesRef(rtdb, conversationId).child(msgId)
+                        .setValue(messagePayload)
+                } catch (e: Exception) {
+                    Log.w("ChatScreen", "Failed to send gallery media to RTDB: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.w("ChatScreen", "Failed to send gallery media to Firestore: ${e.message}")
             }
         }
     }
@@ -331,37 +351,34 @@ fun ChatScreen(
                     text = defaultText,
                     isBlink = isBlinkMode,
                     mediaType = mediaType,
-                    mediaUri = uri.toString()
+                    mediaUri = uri.toString(),
+                    messageId = msgId
                 )
 
-                try {
-                    if (firestore != null) {
-                        val messagePayload = hashMapOf(
-                            "id" to msgId,
-                            "conversationId" to conversationId,
-                            "senderId" to curUserId,
-                            "senderName" to curUserName,
-                            "text" to defaultText,
-                            "mediaUri" to uri.toString(),
-                            "mediaType" to mediaType,
-                            "isBlink" to isBlinkMode,
-                            "blinkSecondsRemaining" to (if (isBlinkMode) (if (isVideo) 15 else 10) else 0),
-                            "createdAt" to FieldValue.serverTimestamp(),
-                            "timestamp" to now,
-                            "timeFormatted" to formattedTimeStr,
-                            "readAt" to null,
-                            "isRead" to false
+                if (repository == null && rtdb != null) {
+                    try {
+                        val messagePayload = FirebaseRtdbManager.messageToMap(
+                            msgId = msgId,
+                            conversationId = conversationId,
+                            senderId = curUserId,
+                            senderName = curUserName,
+                            text = defaultText,
+                            mediaUri = uri.toString(),
+                            mediaType = mediaType,
+                            isBlink = isBlinkMode,
+                            blinkSecondsRemaining = if (isBlinkMode) (if (isVideo) 15 else 10) else 0,
+                            timestamp = now,
+                            timeFormatted = formattedTimeStr
                         )
-                        firestore.collection("messages").document(msgId).set(messagePayload)
-                            .addOnSuccessListener {
-                                isFirestoreConnected = true
-                            }
+                        FirebaseRtdbManager.chatMessagesRef(rtdb, conversationId).child(msgId)
+                            .setValue(messagePayload)
+                            .addOnSuccessListener { isRtdbConnected = true }
                             .addOnFailureListener { e ->
-                                Log.w("ChatScreen", "Firestore media write failed: ${e.message}")
+                                Log.w("ChatScreen", "RTDB media write failed: ${e.message}")
                             }
+                    } catch (e: Exception) {
+                        Log.w("ChatScreen", "Failed to send media to RTDB: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.w("ChatScreen", "Failed to send media to Firestore: ${e.message}")
                 }
             },
             onClose = { isCameraSnapOpen = false },
@@ -371,126 +388,72 @@ fun ChatScreen(
         return
     }
 
-    // Real-time Firestore Snapshot Listeners (Messages & Typing Indicators)
-    DisposableEffect(conversationId, firestore) {
-        var listenerRegistration: ListenerRegistration? = null
-        var typingListenerRegistration: ListenerRegistration? = null
+    // Real-time Firebase Realtime Database Listeners (Messages & Typing Indicators)
+    DisposableEffect(conversationId, rtdb) {
         val curUserId = currentUser?.id ?: "user_me"
-        val indicatorDocId = "${conversationId}_${curUserId}"
+        val safeChatKey = FirebaseRtdbManager.sanitizeKey(conversationId)
+        val safeUserKey = FirebaseRtdbManager.sanitizeKey(curUserId)
 
-        if (firestore != null) {
+        val msgRef = rtdb?.let { FirebaseRtdbManager.chatMessagesRef(it, conversationId) }
+        val typingRef = rtdb?.let { FirebaseRtdbManager.chatsRef(it).child(safeChatKey).child("typing") }
+
+        var msgListener: ValueEventListener? = null
+        var typingListener: ValueEventListener? = null
+
+        if (rtdb != null && msgRef != null) {
             try {
-                listenerRegistration = firestore.collection("messages")
-                    .whereEqualTo("conversationId", conversationId)
-                    .addSnapshotListener { snapshot, error ->
-                        if (error != null) {
-                            Log.w("ChatScreen", "Firestore listen error: ${error.message}")
-                            firestoreError = error.message
-                            isFirestoreConnected = false
-                            return@addSnapshotListener
-                        }
-                        if (snapshot != null) {
-                            val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
-                            val items = snapshot.documents.mapNotNull { doc ->
-                                val id = doc.getString("id") ?: doc.id
-                                val senderId = doc.getString("senderId") ?: ""
-                                val text = doc.getString("text") ?: ""
-                                val mediaUri = doc.getString("mediaUri")
-                                val mediaType = doc.getString("mediaType") ?: "none"
-                                val isBlink = doc.getBoolean("isBlink") ?: false
-                                val blinkSeconds = doc.getLong("blinkSecondsRemaining")?.toInt() ?: 10
-                                val ts = doc.getTimestamp("createdAt")?.toDate()?.time
-                                    ?: doc.getLong("timestamp")
-                                    ?: System.currentTimeMillis()
-                                val reactionStr = doc.getString("reaction")
-                                val reactionsRaw = doc.get("reactions") as? Map<*, *>
-                                val parsedReactions: Map<String, List<String>> = if (reactionsRaw != null) {
-                                    reactionsRaw.mapNotNull { (k, v) ->
-                                        val emojiKey = k as? String ?: return@mapNotNull null
-                                        val usersList = (v as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-                                        if (usersList.isNotEmpty()) emojiKey to usersList else null
-                                    }.toMap()
-                                } else if (!reactionStr.isNullOrBlank()) {
-                                    mapOf(reactionStr to listOf(senderId))
-                                } else {
-                                    emptyMap()
-                                }
+                msgRef.keepSynced(true)
+                val listener = object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val items = snapshot.children.mapNotNull { doc ->
+                            FirebaseRtdbManager.parseMessageSnapshot(doc, conversationId, curUserId)
+                        }.sortedBy { it.timestamp }
 
-                                val readAtTs = doc.getTimestamp("readAt")?.toDate()?.time
-                                    ?: doc.getLong("readAt")
-                                val isRead = (readAtTs != null) || (doc.getBoolean("isRead") ?: false)
+                        rtdbMessages = items
+                        isRtdbConnected = true
+                        rtdbError = null
 
-                                ChatMessage(
-                                    id = id,
-                                    conversationId = conversationId,
-                                    senderId = senderId,
-                                    text = text,
-                                    mediaUri = mediaUri,
-                                    mediaType = mediaType,
-                                    timestamp = ts,
-                                    timeFormatted = timeFormat.format(Date(ts)),
-                                    isBlink = isBlink,
-                                    blinkSecondsRemaining = blinkSeconds,
-                                    isFromMe = (senderId == curUserId),
-                                    isRead = isRead,
-                                    readAt = readAtTs,
-                                    reaction = reactionStr ?: parsedReactions.keys.firstOrNull(),
-                                    reactions = parsedReactions
-                                )
-                            }.sortedBy { it.timestamp }
-
-                            // Update live messages list
-                            firestoreMessages = items
-                            isFirestoreConnected = true
-                            firestoreError = null
-
-                            // When recipient opens the chat or receives messages while viewing,
-                            // automatically update 'readAt' timestamp in Firestore
-                            val unreadIncomingDocs = snapshot.documents.filter { doc ->
-                                val sId = doc.getString("senderId") ?: ""
-                                val rAt = doc.get("readAt")
-                                sId.isNotBlank() && sId != curUserId && rAt == null
+                        // Mark unread incoming messages as read with readAt timestamp in RTDB
+                        val readNow = System.currentTimeMillis()
+                        val updates = hashMapOf<String, Any?>()
+                        for (child in snapshot.children) {
+                            val key = child.key ?: continue
+                            val sId = child.child("senderId").getValue(String::class.java) ?: ""
+                            val rAt = child.child("readAt").value
+                            if (sId.isNotBlank() && sId != curUserId && rAt == null) {
+                                updates["$key/readAt"] = readNow
+                                updates["$key/isRead"] = true
                             }
-                            if (unreadIncomingDocs.isNotEmpty()) {
-                                try {
-                                    val batch = firestore.batch()
-                                    for (doc in unreadIncomingDocs) {
-                                        batch.update(doc.reference, mapOf(
-                                            "readAt" to FieldValue.serverTimestamp(),
-                                            "isRead" to true
-                                        ))
-                                    }
-                                    batch.commit().addOnFailureListener { e ->
-                                        Log.w("ChatScreen", "Failed to mark incoming messages as read: ${e.message}")
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w("ChatScreen", "Error updating read status: ${e.message}")
-                                }
+                        }
+                        if (updates.isNotEmpty()) {
+                            msgRef.updateChildren(updates).addOnFailureListener { e ->
+                                Log.w("ChatScreen", "Failed to mark incoming messages as read: ${e.message}")
                             }
                         }
                     }
+
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.w("ChatScreen", "RTDB listen error: ${error.message}")
+                        rtdbError = error.message
+                        isRtdbConnected = false
+                    }
+                }
+                msgListener = listener
+                msgRef.orderByChild("timestamp").addValueEventListener(listener)
             } catch (e: Exception) {
-                Log.w("ChatScreen", "Failed to attach snapshot listener: ${e.message}")
+                Log.w("ChatScreen", "Failed to attach RTDB message listener: ${e.message}")
             }
 
-            // Real-time typing indicators listener
-            try {
-                typingListenerRegistration = firestore.collection("typing_indicators")
-                    .whereEqualTo("conversationId", conversationId)
-                    .whereEqualTo("isTyping", true)
-                    .addSnapshotListener { snapshot, error ->
-                        if (error != null) {
-                            Log.w("ChatScreen", "Typing listener error: ${error.message}")
-                            return@addSnapshotListener
-                        }
-                        if (snapshot != null) {
+            if (typingRef != null) {
+                try {
+                    val tListener = object : ValueEventListener {
+                        override fun onDataChange(snapshot: DataSnapshot) {
                             val now = System.currentTimeMillis()
-                            val typers = snapshot.documents.mapNotNull { doc ->
-                                val uId = doc.getString("userId") ?: ""
-                                val isTyping = doc.getBoolean("isTyping") ?: false
-                                val updatedAt = doc.getLong("updatedAt") ?: 0L
-                                val name = doc.getString("userName") ?: recipientUsername
-                                // Only other participants active in the last 6 seconds
+                            val typers = snapshot.children.mapNotNull { doc ->
+                                val uId = doc.child("userId").getValue(String::class.java) ?: ""
+                                val isTyping = doc.child("isTyping").getValue(Boolean::class.java) ?: false
+                                val updatedAt = (doc.child("updatedAt").value as? Number)?.toLong() ?: 0L
+                                val name = doc.child("userName").getValue(String::class.java) ?: recipientUsername
                                 if (uId != curUserId && isTyping && (now - updatedAt < 6000)) {
                                     name
                                 } else {
@@ -499,19 +462,29 @@ fun ChatScreen(
                             }
                             typingUsers = typers
                         }
+
+                        override fun onCancelled(error: DatabaseError) {
+                            Log.w("ChatScreen", "RTDB typing listener error: ${error.message}")
+                        }
                     }
-            } catch (e: Exception) {
-                Log.w("ChatScreen", "Failed to attach typing listener: ${e.message}")
+                    typingListener = tListener
+                    typingRef.addValueEventListener(tListener)
+                } catch (e: Exception) {
+                    Log.w("ChatScreen", "Failed to attach typing listener: ${e.message}")
+                }
             }
         }
 
         onDispose {
-            listenerRegistration?.remove()
-            typingListenerRegistration?.remove()
-            // Mark self as not typing on exit
-            if (firestore != null) {
+            if (msgRef != null && msgListener != null) {
+                msgRef.removeEventListener(msgListener)
+            }
+            if (typingRef != null && typingListener != null) {
+                typingRef.removeEventListener(typingListener)
+            }
+            if (typingRef != null) {
                 try {
-                    firestore.collection("typing_indicators").document(indicatorDocId).set(
+                    typingRef.child(safeUserKey).setValue(
                         hashMapOf(
                             "conversationId" to conversationId,
                             "userId" to curUserId,
@@ -520,18 +493,16 @@ fun ChatScreen(
                             "updatedAt" to System.currentTimeMillis()
                         )
                     )
-                } catch (e: Exception) {
-                    // Ignore
-                }
+                } catch (_: Exception) {}
             }
         }
     }
 
-    // Unified message stream: merges Firestore documents with local state to ensure instant feedback
-    val displayMessages = remember(firestoreMessages, repoMessages) {
+    // Unified message stream: merges RTDB records with local repository state for instant feedback
+    val displayMessages = remember(rtdbMessages, repoMessages) {
         val map = linkedMapOf<String, ChatMessage>()
         repoMessages.forEach { map[it.id] = it }
-        firestoreMessages.forEach { map[it.id] = it }
+        rtdbMessages.forEach { map[it.id] = it }
         map.values.sortedBy { it.timestamp }
     }
 
@@ -554,63 +525,62 @@ fun ChatScreen(
             val now = System.currentTimeMillis()
             val formattedTimeStr = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(now))
 
-            // 1. Send via repository (updates local reactive flows, conversation last message & triggers AI reply)
-            repository?.sendMessage(
-                conversationId = conversationId,
-                text = trimmed,
-                isBlink = isBlinkMode,
-                mediaType = "none"
-            )
-
-            // 2. Direct Firestore write
-            try {
-                if (firestore != null) {
-                    val messagePayload = hashMapOf(
-                        "id" to msgId,
-                        "conversationId" to conversationId,
-                        "senderId" to curUserId,
-                        "senderName" to curUserName,
-                        "text" to trimmed,
-                        "mediaUri" to null,
-                        "mediaType" to "none",
-                        "isBlink" to isBlinkMode,
-                        "blinkSecondsRemaining" to (if (isBlinkMode) 10 else 0),
-                        "createdAt" to FieldValue.serverTimestamp(),
-                        "timestamp" to now,
-                        "timeFormatted" to formattedTimeStr,
-                        "readAt" to null,
-                        "isRead" to false
+            // 1. Send via repository (persists locally & writes once to RTDB messages/{chatId}/{msgId} + chats/{chatId})
+            if (repository != null) {
+                repository.sendMessage(
+                    conversationId = conversationId,
+                    text = trimmed,
+                    isBlink = isBlinkMode,
+                    mediaType = "none",
+                    messageId = msgId
+                )
+            } else if (rtdb != null) {
+                try {
+                    val messagePayload = FirebaseRtdbManager.messageToMap(
+                        msgId = msgId,
+                        conversationId = conversationId,
+                        senderId = curUserId,
+                        senderName = curUserName,
+                        text = trimmed,
+                        mediaUri = null,
+                        mediaType = "none",
+                        isBlink = isBlinkMode,
+                        blinkSecondsRemaining = if (isBlinkMode) 10 else 0,
+                        timestamp = now,
+                        timeFormatted = formattedTimeStr
                     )
-                    firestore.collection("messages").document(msgId).set(messagePayload)
-                        .addOnSuccessListener {
-                            isFirestoreConnected = true
-                        }
+                    FirebaseRtdbManager.chatMessagesRef(rtdb, conversationId).child(msgId)
+                        .setValue(messagePayload)
+                        .addOnSuccessListener { isRtdbConnected = true }
                         .addOnFailureListener { e ->
-                            Log.w("ChatScreen", "Firestore send failure: ${e.message}")
+                            Log.w("ChatScreen", "RTDB send failure: ${e.message}")
                         }
+                } catch (e: Exception) {
+                    Log.w("ChatScreen", "Exception writing message to RTDB: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.w("ChatScreen", "Exception writing message to Firestore: ${e.message}")
             }
 
             inputText = ""
             isSending = false
 
-            // Clear self typing indicator in Firestore immediately upon sending
+            // Clear self typing indicator in RTDB immediately upon sending
             try {
-                val indicatorDocId = "${conversationId}_${curUserId}"
-                firestore?.collection("typing_indicators")?.document(indicatorDocId)?.set(
-                    hashMapOf(
-                        "conversationId" to conversationId,
-                        "userId" to curUserId,
-                        "userName" to curUserName,
-                        "isTyping" to false,
-                        "updatedAt" to System.currentTimeMillis()
-                    )
-                )
-            } catch (e: Exception) {
-                // Ignore
-            }
+                if (rtdb != null) {
+                    FirebaseRtdbManager.chatsRef(rtdb)
+                        .child(FirebaseRtdbManager.sanitizeKey(conversationId))
+                        .child("typing")
+                        .child(FirebaseRtdbManager.sanitizeKey(curUserId))
+                        .setValue(
+                            hashMapOf(
+                                "conversationId" to conversationId,
+                                "userId" to curUserId,
+                                "userName" to curUserName,
+                                "isTyping" to false,
+                                "updatedAt" to System.currentTimeMillis()
+                            )
+                        )
+                }
+            } catch (_: Exception) {}
 
             coroutineScope.launch {
                 if (displayMessages.isNotEmpty()) {
@@ -635,8 +605,8 @@ fun ChatScreen(
         }
         val newPrimaryReaction = newReactions.keys.firstOrNull()
 
-        // 1. Optimistic UI update on firestoreMessages
-        firestoreMessages = firestoreMessages.map { msg ->
+        // 1. Optimistic UI update on rtdbMessages
+        rtdbMessages = rtdbMessages.map { msg ->
             if (msg.id == targetMsg.id) {
                 msg.copy(
                     reactions = newReactions,
@@ -645,24 +615,25 @@ fun ChatScreen(
             } else msg
         }
 
-        // 2. Local repository update
-        repository?.toggleMessageReaction(conversationId, targetMsg.id, emoji, curUserId)
-
-        // 3. Real-time Cloud Firestore write
-        if (firestore != null) {
+        // 2. Local repository + RTDB sync
+        if (repository != null) {
+            repository.toggleMessageReaction(conversationId, targetMsg.id, emoji, curUserId)
+        } else if (rtdb != null) {
             coroutineScope.launch {
                 try {
-                    firestore.collection("messages").document(targetMsg.id).set(
-                        mapOf(
-                            "reactions" to newReactions,
-                            "reaction" to newPrimaryReaction
-                        ),
-                        SetOptions.merge()
-                    ).addOnFailureListener { e ->
-                        Log.w("ChatScreen", "Failed to update reaction in Firestore: ${e.message}")
-                    }
+                    FirebaseRtdbManager.chatMessagesRef(rtdb, conversationId)
+                        .child(targetMsg.id)
+                        .updateChildren(
+                            mapOf(
+                                "reactions" to newReactions,
+                                "reaction" to newPrimaryReaction
+                            )
+                        )
+                        .addOnFailureListener { e ->
+                            Log.w("ChatScreen", "Failed to update reaction in RTDB: ${e.message}")
+                        }
                 } catch (e: Exception) {
-                    Log.w("ChatScreen", "Firestore reaction error: ${e.message}")
+                    Log.w("ChatScreen", "RTDB reaction error: ${e.message}")
                 }
             }
         }
@@ -738,43 +709,45 @@ fun ChatScreen(
                 isRead = false,
                 readAt = null
             )
-            firestoreMessages = (firestoreMessages + optimisticVoiceMsg).sortedBy { it.timestamp }
+            rtdbMessages = (rtdbMessages + optimisticVoiceMsg).sortedBy { it.timestamp }
 
-            // 2. Repository fallback update
+            // 2. Repository fallback update (writes with same msgId)
             repository?.sendMessage(
                 conversationId = conversationId,
                 text = textCaption,
                 isBlink = isBlinkMode,
                 mediaType = "audio",
-                mediaUri = localUri
+                mediaUri = localUri,
+                messageId = msgId
             )
 
-            // 3. Upload to Firebase Storage and update Firestore message
+            // 3. Upload / encode audio and update RTDB message
             FirebaseStorageAudioUploader.uploadVoiceClip(
                 audioFile = recordedFile,
                 conversationId = conversationId,
                 messageId = msgId,
                 onSuccess = { downloadUrl ->
                     try {
-                        val payload = hashMapOf(
-                            "id" to msgId,
-                            "conversationId" to conversationId,
-                            "senderId" to curUserId,
-                            "senderName" to curUserName,
-                            "text" to textCaption,
-                            "mediaUri" to downloadUrl,
-                            "mediaType" to "audio",
-                            "isBlink" to isBlinkMode,
-                            "blinkSecondsRemaining" to (if (isBlinkMode) 15 else 0),
-                            "createdAt" to FieldValue.serverTimestamp(),
-                            "timestamp" to now,
-                            "timeFormatted" to formattedTime,
-                            "readAt" to null,
-                            "isRead" to false
+                        val payload = FirebaseRtdbManager.messageToMap(
+                            msgId = msgId,
+                            conversationId = conversationId,
+                            senderId = curUserId,
+                            senderName = curUserName,
+                            text = textCaption,
+                            mediaUri = downloadUrl,
+                            mediaType = "audio",
+                            isBlink = isBlinkMode,
+                            blinkSecondsRemaining = if (isBlinkMode) 15 else 0,
+                            timestamp = now,
+                            timeFormatted = formattedTime
                         )
-                        firestore?.collection("messages")?.document(msgId)?.set(payload, SetOptions.merge())
+                        if (rtdb != null) {
+                            FirebaseRtdbManager.chatMessagesRef(rtdb, conversationId)
+                                .child(msgId)
+                                .updateChildren(payload)
+                        }
                     } catch (e: Exception) {
-                        Log.w("ChatScreen", "Failed to update voice message in Firestore: ${e.message}")
+                        Log.w("ChatScreen", "Failed to update voice message in RTDB: ${e.message}")
                     }
                 },
                 onFailure = { e ->
@@ -784,8 +757,8 @@ fun ChatScreen(
 
             coroutineScope.launch {
                 delay(100)
-                if (firestoreMessages.isNotEmpty()) {
-                    listState.animateScrollToItem(firestoreMessages.size - 1)
+                if (rtdbMessages.isNotEmpty()) {
+                    listState.animateScrollToItem(rtdbMessages.size - 1)
                 }
             }
         }
@@ -826,188 +799,307 @@ fun ChatScreen(
             .fillMaxSize()
             .testTag("chat_screen"),
         topBar = {
-            TopAppBar(
-                title = {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 2.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                ) {
+                    // Row 1: Navigation, Avatar & Recipient Status, Audio/Video Calls
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.testTag("chat_header_info")
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        AvatarBadge(
-                            name = conversationTitle,
-                            colorHex = recipientAvatarColorHex,
-                            size = 38.dp,
-                            showOnline = true,
-                            isOnline = isRecipientOnline
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = conversationTitle,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                        if (onBack != null) {
+                            IconButton(
+                                onClick = onBack,
+                                modifier = Modifier.testTag("chat_back_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back"
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                // Live Firestore Status Badge
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (isFirestoreConnected) BlinkGreen.copy(alpha = 0.18f)
-                                            else BlinkAmber.copy(alpha = 0.18f)
-                                        )
-                                        .border(
-                                            1.dp,
-                                            if (isFirestoreConnected) BlinkGreen.copy(alpha = 0.5f)
-                                            else BlinkAmber.copy(alpha = 0.5f),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                        .testTag("firestore_status_badge")
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.width(12.dp))
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("chat_header_info")
+                        ) {
+                            AvatarBadge(
+                                name = conversationTitle,
+                                colorHex = recipientAvatarColorHex,
+                                size = 38.dp,
+                                showOnline = true,
+                                isOnline = isRecipientOnline && !isRecipientBlocked
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = conversationTitle,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    // Live Realtime Database Status Badge
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(
+                                                if (isRtdbConnected) BlinkGreen.copy(alpha = 0.18f)
+                                                else BlinkAmber.copy(alpha = 0.18f)
+                                            )
+                                            .border(
+                                                1.dp,
+                                                if (isRtdbConnected) BlinkGreen.copy(alpha = 0.5f)
+                                                else BlinkAmber.copy(alpha = 0.5f),
+                                                RoundedCornerShape(8.dp)
+                                            )
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            .testTag("rtdb_status_badge")
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (isRtdbConnected) BlinkGreen else BlinkAmber)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = if (isRtdbConnected) "RTDB Live" else "RTDB Sync",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isRtdbConnected) BlinkGreen else BlinkAmber
+                                            )
+                                        }
+                                    }
+                                }
+                                if (isOtherParticipantTyping) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.testTag("chat_header_typing_indicator")
+                                    ) {
                                         Box(
                                             modifier = Modifier
                                                 .size(6.dp)
                                                 .clip(CircleShape)
-                                                .background(if (isFirestoreConnected) BlinkGreen else BlinkAmber)
+                                                .background(BlinkCyanLight)
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text(
-                                            text = if (isFirestoreConnected) "Firestore Live" else "Firestore Sync",
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isFirestoreConnected) BlinkGreen else BlinkAmber
+                                            text = "$typingDisplayName is typing...",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = BlinkCyanLight,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                } else {
+                                    Text(
+                                        text = when {
+                                            isRecipientBlocked -> "@$recipientUsername • Blocked"
+                                            isRecipientOnline -> "@$recipientUsername • Active now"
+                                            else -> "@$recipientUsername • Offline"
+                                        },
+                                        fontSize = 11.sp,
+                                        color = if (isRecipientBlocked) BlinkPink else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                             }
-                            if (isOtherParticipantTyping) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.testTag("chat_header_typing_indicator")
+                        }
+
+                        if (!isAiChat && !isRecipientBlocked) {
+                            IconButton(
+                                onClick = { repository?.startCall(recipientUser, isVideo = false) },
+                                modifier = Modifier.testTag("chat_voice_call_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Call,
+                                    contentDescription = "Voice Call",
+                                    tint = BlinkCyanLight
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { repository?.startCall(recipientUser, isVideo = true) },
+                                modifier = Modifier.testTag("chat_video_call_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Videocam,
+                                    contentDescription = "Video Call",
+                                    tint = BlinkPrimaryLight
+                                )
+                            }
+                        }
+                    }
+
+                    // Row 2: Chat Controls (Blink, AI Summary, Report & Block)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Ephemeral Blink Mode Toggle
+                            OutlinedButton(
+                                onClick = { isBlinkMode = !isBlinkMode },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isBlinkMode) BlinkPink else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                                ),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (isBlinkMode) BlinkPink.copy(alpha = 0.14f) else Color.Transparent,
+                                    contentColor = if (isBlinkMode) BlinkPink else MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("chat_blink_mode_toggle")
+                            ) {
+                                Icon(
+                                    imageVector = if (isBlinkMode) Icons.Default.HourglassTop else Icons.Outlined.HourglassEmpty,
+                                    contentDescription = "Disappearing Blink Mode",
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isBlinkMode) "Blink On" else "Blink",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            // AI Chat Summary action
+                            OutlinedButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        isSummarizing = true
+                                        showAiSummarySheet = true
+                                        chatSummary = BlinkAiService.summarizeChat(displayMessages.map { it.text })
+                                        isSummarizing = false
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                border = BorderStroke(1.dp, BlinkPrimary.copy(alpha = 0.4f)),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = BlinkPrimaryLight
+                                ),
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("chat_ai_summary_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Summarize,
+                                    contentDescription = "AI Summary",
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Summary",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+
+                        if (!isAiChat) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = { showReportDialog = true },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    border = BorderStroke(1.dp, BlinkAmber.copy(alpha = 0.55f)),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = BlinkAmber.copy(alpha = 0.1f),
+                                        contentColor = BlinkAmber
+                                    ),
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("chat_report_button")
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .clip(CircleShape)
-                                            .background(BlinkCyanLight)
+                                    Icon(
+                                        imageVector = Icons.Default.Report,
+                                        contentDescription = "Report user",
+                                        modifier = Modifier.size(15.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "$typingDisplayName is typing...",
+                                        text = "Report",
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = BlinkCyanLight
+                                        fontWeight = FontWeight.Bold
                                     )
                                 }
-                            } else {
-                                Text(
-                                    text = if (isRecipientOnline) "@$recipientUsername • Active now" else "@$recipientUsername • Offline",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+
+                                OutlinedButton(
+                                    onClick = {
+                                        if (!isRecipientBlocked) {
+                                            showBlockDialog = true
+                                        } else {
+                                            repository?.unblockUser(recipientUser.id)
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    border = BorderStroke(1.dp, BlinkPink.copy(alpha = 0.65f)),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = BlinkPink.copy(alpha = 0.12f),
+                                        contentColor = BlinkPink
+                                    ),
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("chat_block_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Block,
+                                        contentDescription = if (isRecipientBlocked) "Unblock user" else "Block user",
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (isRecipientBlocked) "Unblock" else "Block",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
-                },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier.testTag("chat_back_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back"
-                            )
-                        }
-                    }
-                },
-                actions = {
-                    // Voice Call Button
-                    IconButton(
-                        onClick = {
-                            val target = repository?.allUsers?.value?.find { it.username == recipientUsername }
-                                ?: User(
-                                    id = "user_$recipientUsername",
-                                    username = recipientUsername,
-                                    displayName = conversationTitle,
-                                    email = "$recipientUsername@blinkchat.com",
-                                    avatarColorHex = recipientAvatarColorHex,
-                                    isOnline = isRecipientOnline
-                                )
-                            repository?.startCall(target, isVideo = false)
-                        },
-                        modifier = Modifier.testTag("chat_voice_call_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = "Voice Call",
-                            tint = BlinkCyanLight
-                        )
-                    }
 
-                    // Video Call Button
-                    IconButton(
-                        onClick = {
-                            val target = repository?.allUsers?.value?.find { it.username == recipientUsername }
-                                ?: User(
-                                    id = "user_$recipientUsername",
-                                    username = recipientUsername,
-                                    displayName = conversationTitle,
-                                    email = "$recipientUsername@blinkchat.com",
-                                    avatarColorHex = recipientAvatarColorHex,
-                                    isOnline = isRecipientOnline
-                                )
-                            repository?.startCall(target, isVideo = true)
-                        },
-                        modifier = Modifier.testTag("chat_video_call_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Videocam,
-                            contentDescription = "Video Call",
-                            tint = BlinkPrimaryLight
-                        )
-                    }
-
-                    // AI Chat Summary action
-                    IconButton(
-                        onClick = {
-                            coroutineScope.launch {
-                                isSummarizing = true
-                                showAiSummarySheet = true
-                                chatSummary = BlinkAiService.summarizeChat(displayMessages.map { it.text })
-                                isSummarizing = false
-                            }
-                        },
-                        modifier = Modifier.testTag("chat_ai_summary_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Summarize,
-                            contentDescription = "AI Summary",
-                            tint = BlinkPrimaryLight
-                        )
-                    }
-
-                    // Ephemeral Blink Mode Toggle
-                    IconButton(
-                        onClick = { isBlinkMode = !isBlinkMode },
-                        modifier = Modifier.testTag("chat_blink_mode_toggle")
-                    ) {
-                        Icon(
-                            imageVector = if (isBlinkMode) Icons.Default.HourglassTop else Icons.Outlined.HourglassEmpty,
-                            contentDescription = "Disappearing Blink Mode",
-                            tint = if (isBlinkMode) BlinkPink else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
-            )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+                }
+            }
         },
         bottomBar = {
             Column(
@@ -1016,8 +1108,33 @@ fun ChatScreen(
                     .navigationBarsPadding()
                     .background(MaterialTheme.colorScheme.surface)
             ) {
-                // Active Blink Mode Banner
-                AnimatedVisibility(visible = isBlinkMode) {
+                if (isRecipientBlocked) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(BlinkPink.copy(alpha = 0.12f))
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
+                            .testTag("chat_blocked_banner"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Block,
+                            contentDescription = null,
+                            tint = BlinkPink,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "You blocked @$recipientUsername. Unblock them to resume messaging.",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = BlinkPink
+                        )
+                    }
+                } else {
+                    // Active Blink Mode Banner
+                    AnimatedVisibility(visible = isBlinkMode) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1371,6 +1488,7 @@ fun ChatScreen(
                         }
                     }
                 }
+                }
             }
         }
     ) { paddingValues ->
@@ -1412,7 +1530,7 @@ fun ChatScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Messages are synchronized in real-time with Cloud Firestore. Type a message below to start the conversation! ⚡",
+                        text = "Messages persist locally and sync in real-time via Firebase Realtime Database. Type a message below to start the conversation! ⚡",
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 18.sp,
@@ -1420,7 +1538,7 @@ fun ChatScreen(
                     )
                 }
             } else {
-                // List of Messages from Firestore
+                // List of Messages from Firebase Realtime Database
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
@@ -1431,7 +1549,7 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
-                    // Header indicating Firestore live channel
+                    // Header indicating Realtime Database live channel
                     item {
                         Box(
                             modifier = Modifier
@@ -1444,7 +1562,7 @@ fun ChatScreen(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
                             ) {
                                 Text(
-                                    text = "💬 Firestore Live Chat • ${displayMessages.size} messages",
+                                    text = "💬 Realtime DB Live Chat • ${displayMessages.size} messages",
                                     fontSize = 10.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontWeight = FontWeight.Medium,
@@ -1644,6 +1762,35 @@ fun ChatScreen(
             onReactionSelected = { emoji ->
                 onToggleReaction(selectedMessageForReaction!!, emoji)
                 selectedMessageForReaction = null
+            }
+        )
+    }
+
+    // Report User Dialog
+    if (showReportDialog) {
+        ReportDialog(
+            targetName = "@$recipientUsername",
+            onDismiss = { showReportDialog = false },
+            onSubmitReport = { reason, details ->
+                repository?.reportContent(
+                    targetUserId = recipientUser.id,
+                    targetPostId = null,
+                    reason = reason,
+                    details = details.ifBlank { "Reported from chat with $conversationTitle ($conversationId)" }
+                )
+            }
+        )
+    }
+
+    // Block User Confirmation Dialog
+    if (showBlockDialog) {
+        BlockConfirmDialog(
+            targetName = "@$recipientUsername",
+            onDismiss = { showBlockDialog = false },
+            onConfirmBlock = {
+                showBlockDialog = false
+                repository?.blockUser(recipientUser)
+                onBack?.invoke()
             }
         )
     }

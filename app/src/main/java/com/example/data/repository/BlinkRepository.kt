@@ -5,13 +5,17 @@ import android.util.Log
 import com.example.R
 import com.example.data.ai.BlinkAiService
 import com.example.data.cache.BlinkOfflineCache
+import com.example.data.firebase.FirebaseRtdbManager
 import com.example.data.model.*
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.DatabaseReference
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ServerValue
+import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,22 +33,18 @@ import java.util.UUID
 class BlinkRepository(private val context: Context? = null) {
     private val scope = CoroutineScope(Dispatchers.Main)
 
-    val firestore: FirebaseFirestore?
-        get() = firestoreDb
+    val realtimeDb: FirebaseDatabase?
+        get() = rtdb
 
-    private val firestoreDb: FirebaseFirestore? by lazy {
-        try {
-            val dbId = context?.getString(R.string.firestore_database_id)
-            if (!dbId.isNullOrBlank()) {
-                FirebaseFirestore.getInstance(dbId)
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore custom db initialization: ${e.message}")
-            null
-        }
+    private val rtdb: FirebaseDatabase? by lazy {
+        FirebaseRtdbManager.getDatabase(context)
     }
+
+    private var usersListener: ValueEventListener? = null
+    private var chatsListener: ValueEventListener? = null
+    private var blinksListener: ValueEventListener? = null
+    private var friendRequestsListener: ValueEventListener? = null
+    private var activeFriendRequestUserId: String? = null
 
     // Current logged in user
     private val _currentUser = MutableStateFlow<User?>(null)
@@ -88,13 +88,20 @@ class BlinkRepository(private val context: Context? = null) {
     private val _reports = MutableStateFlow<List<SafetyReport>>(emptyList())
     val reports: StateFlow<List<SafetyReport>> = _reports.asStateFlow()
 
-    // Friend Requests (Firestore Synchronized)
+    // Friend Requests (Realtime Database Synchronized)
     private val _friendRequests = MutableStateFlow<List<FriendRequest>>(emptyList())
     val friendRequests: StateFlow<List<FriendRequest>> = _friendRequests.asStateFlow()
 
     // Social Notifications Activity Feed
     private val _notifications = MutableStateFlow<List<SocialNotification>>(emptyList())
     val notifications: StateFlow<List<SocialNotification>> = _notifications.asStateFlow()
+
+    // Real Followers & Following Lists (empty until users connect/follow)
+    private val _followers = MutableStateFlow<List<User>>(emptyList())
+    val followers: StateFlow<List<User>> = _followers.asStateFlow()
+
+    private val _following = MutableStateFlow<List<User>>(emptyList())
+    val following: StateFlow<List<User>> = _following.asStateFlow()
 
     // Active Call State
     data class CallState(
@@ -135,8 +142,10 @@ class BlinkRepository(private val context: Context? = null) {
             avatarColorHex = "#8B5CF6",
             bio = "Visual storyteller 📸 Neon enthusiast ⚡",
             streaksCount = 28,
-            postsCount = 6,
-            friendsCount = 189,
+            postsCount = 0,
+            friendsCount = 0,
+            followersCount = 0,
+            followingCount = 0,
             statusText = "Exploring Tokyo nights ✨",
             location = "Tokyo, Japan",
             coordinates = "35.6762° N, 139.6503° E",
@@ -482,7 +491,7 @@ class BlinkRepository(private val context: Context? = null) {
                 title = "started following you",
                 description = "Tap to view profile",
                 timeAgo = "1d ago",
-                isFollowedBack = true
+                isFollowedBack = false
             )
         )
 
@@ -1601,6 +1610,27 @@ class BlinkRepository(private val context: Context? = null) {
             cache.loadCachedPosts()?.let { if (it.isNotEmpty()) _posts.value = it }
             cache.loadCachedCustomers()?.let { if (it.isNotEmpty()) _customerAccounts.value = it }
             cache.loadCachedPayments()?.let { if (it.isNotEmpty()) _payments.value = it }
+            cache.loadCachedConversations()?.let { cachedConvs ->
+                if (cachedConvs.isNotEmpty()) {
+                    _conversations.update { existing ->
+                        val map = (cachedConvs + existing).associateBy { it.id }
+                        map.values.toList()
+                    }
+                }
+            }
+            cache.loadCachedMessages()?.let { cachedMsgs ->
+                if (cachedMsgs.isNotEmpty()) {
+                    _messages.update { existing ->
+                        val merged = existing.toMutableMap()
+                        cachedMsgs.forEach { (convId, msgs) ->
+                            val curList = merged[convId] ?: emptyList()
+                            val combined = (curList + msgs).associateBy { it.id }.values.sortedBy { it.timestamp }
+                            merged[convId] = combined
+                        }
+                        merged
+                    }
+                }
+            }
         }
 
         // Seed initial incoming friend requests
@@ -1628,7 +1658,7 @@ class BlinkRepository(private val context: Context? = null) {
         )
         _friendRequests.value = listOf(reqChloe, reqJin)
 
-        listenToFirestoreFriendRequests()
+        startRtdbGlobalSync()
     }
 
     // --- CRM Dashboard & Offline Caching Methods ---
@@ -1731,14 +1761,20 @@ class BlinkRepository(private val context: Context? = null) {
             email = email.trim(),
             avatarColorHex = listOf("#8B5CF6", "#06B6D4", "#EC4899", "#10B981", "#F59E0B").random(),
             bio = bio.ifBlank { "New to Blinkchat! ⚡" },
-            streaksCount = 1,
+            streaksCount = 0,
             postsCount = 0,
-            friendsCount = 1,
+            friendsCount = 0,
+            followersCount = 0,
+            followingCount = 0,
             statusText = "Ready to blink ✨",
             isOnline = true
         )
+        _followers.value = emptyList()
+        _following.value = emptyList()
         _allUsers.update { it + newUser }
         _currentUser.value = newUser
+        syncUserToRtdb(newUser)
+        listenToRtdbFriendRequests(newUser.id)
         return true
     }
 
@@ -1748,10 +1784,15 @@ class BlinkRepository(private val context: Context? = null) {
             it.username.lowercase() == clean || it.email.lowercase() == clean 
         }
         if (found != null) {
-            _currentUser.value = found
+            _followers.value = emptyList()
+            _following.value = emptyList()
+            val onlineFound = found.copy(isOnline = true)
+            _currentUser.value = onlineFound
+            syncUserToRtdb(onlineFound)
+            listenToRtdbFriendRequests(onlineFound.id)
             return true
         }
-        // If not found, create a demo profile for frictionless sign-in
+        // If not found, create a profile for frictionless sign-in
         val newUser = User(
             id = "user_" + UUID.randomUUID().toString().take(8),
             username = clean,
@@ -1759,13 +1800,19 @@ class BlinkRepository(private val context: Context? = null) {
             email = "$clean@blinkchat.com",
             avatarColorHex = "#8B5CF6",
             bio = "Hello Blinkchat! 📸✨",
-            streaksCount = 1,
+            streaksCount = 0,
             postsCount = 0,
-            friendsCount = 3,
+            friendsCount = 0,
+            followersCount = 0,
+            followingCount = 0,
             isOnline = true
         )
+        _followers.value = emptyList()
+        _following.value = emptyList()
         _allUsers.update { it + newUser }
         _currentUser.value = newUser
+        syncUserToRtdb(newUser)
+        listenToRtdbFriendRequests(newUser.id)
         return true
     }
 
@@ -1777,8 +1824,15 @@ class BlinkRepository(private val context: Context? = null) {
 
         val existing = _allUsers.value.find { it.id == firebaseUser.uid || (it.email.isNotBlank() && it.email.equals(email, ignoreCase = true)) }
         if (existing != null) {
-            val updated = existing.copy(id = firebaseUser.uid, displayName = displayName)
+            val updated = existing.copy(id = firebaseUser.uid, displayName = displayName, isOnline = true)
+            _followers.value = emptyList()
+            _following.value = emptyList()
+            _allUsers.update { list ->
+                list.map { if (it.id == existing.id || it.id == updated.id) updated else it }
+            }
             _currentUser.value = updated
+            syncUserToRtdb(updated)
+            listenToRtdbFriendRequests(updated.id)
             return updated
         }
 
@@ -1789,13 +1843,19 @@ class BlinkRepository(private val context: Context? = null) {
             email = email,
             avatarColorHex = "#8B5CF6",
             bio = "Verified via Firebase Authentication ⚡",
-            streaksCount = 1,
+            streaksCount = 0,
             postsCount = 0,
-            friendsCount = 5,
+            friendsCount = 0,
+            followersCount = 0,
+            followingCount = 0,
             isOnline = true
         )
+        _followers.value = emptyList()
+        _following.value = emptyList()
         _allUsers.update { it + newUser }
         _currentUser.value = newUser
+        syncUserToRtdb(newUser)
+        listenToRtdbFriendRequests(newUser.id)
         return newUser
     }
 
@@ -1803,13 +1863,21 @@ class BlinkRepository(private val context: Context? = null) {
         val target = _allUsers.value.find { it.id == userId }
         if (target != null) {
             _currentUser.value = target
+            syncUserToRtdb(target)
+            listenToRtdbFriendRequests(target.id)
         }
     }
 
     fun logout() {
+        val cur = _currentUser.value
+        if (cur != null) {
+            syncUserToRtdb(cur.copy(isOnline = false))
+        }
         try {
             Firebase.auth.signOut()
         } catch (_: Exception) {}
+        _followers.value = emptyList()
+        _following.value = emptyList()
         _currentUser.value = null
     }
 
@@ -1827,6 +1895,7 @@ class BlinkRepository(private val context: Context? = null) {
             list.map { if (it.id == updated.id) updated else it }
         }
         _privacySettings.update { it.copy(ghostMode = isGhostMode) }
+        syncUserToRtdb(updated)
         syncOfflineCache()
     }
 
@@ -1859,10 +1928,315 @@ class BlinkRepository(private val context: Context? = null) {
         _allUsers.update { list ->
             list.map { if (it.id == updated.id) updated else it }
         }
+        syncUserToRtdb(updated)
         syncOfflineCache()
     }
 
-    // --- Friend Request System (Firestore & In-App Sync) ---
+    // --- Friend Request System & Realtime Database Global Sync ---
+    private fun syncUserToRtdb(user: User) {
+        val db = rtdb ?: return
+        try {
+            val key = FirebaseRtdbManager.sanitizeKey(user.id)
+            FirebaseRtdbManager.usersRef(db)
+                .child(key)
+                .updateChildren(FirebaseRtdbManager.userToMap(user))
+        } catch (e: Exception) {
+            Log.w("BlinkRepo", "RTDB syncUser failed: ${e.message}")
+        }
+    }
+
+    private fun startRtdbGlobalSync() {
+        val db = rtdb ?: return
+        _currentUser.value?.let {
+            syncUserToRtdb(it)
+            listenToRtdbFriendRequests(it.id)
+        }
+
+        // 1. Sync users across phones so users on another device are discoverable
+        if (usersListener == null) {
+            try {
+                val listener = object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val remoteUsers = snapshot.children.mapNotNull {
+                            FirebaseRtdbManager.parseUserSnapshot(it)
+                        }
+                        if (remoteUsers.isNotEmpty()) {
+                            _allUsers.update { existing ->
+                                val map = existing.associateBy { it.id }.toMutableMap()
+                                remoteUsers.forEach { remote ->
+                                    map[remote.id] = remote
+                                }
+                                map.values.toList()
+                            }
+                        }
+                    }
+
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.w("BlinkRepo", "RTDB users listener cancelled: ${error.message}")
+                    }
+                }
+                usersListener = listener
+                FirebaseRtdbManager.usersRef(db).addValueEventListener(listener)
+            } catch (e: Exception) {
+                Log.w("BlinkRepo", "RTDB users listener error: ${e.message}")
+            }
+        }
+
+        // 2. Sync chats across phones in real time
+        if (chatsListener == null) {
+            try {
+                val listener = object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val curUser = _currentUser.value
+                        val curId = curUser?.id ?: "user_me"
+                        val curKey = FirebaseRtdbManager.sanitizeKey(curId)
+                        val remoteChats = snapshot.children.mapNotNull { chatSnap ->
+                            val chatId = chatSnap.key ?: return@mapNotNull null
+                            if (chatId.startsWith("_")) return@mapNotNull null
+                            val type = chatSnap.child("type").getValue(String::class.java)
+                            if (type == "random") return@mapNotNull null
+
+                            val participantsSnap = chatSnap.child("participants")
+                            val isGroup = chatSnap.child("isGroup").getValue(Boolean::class.java) ?: false
+                            val participantKeys = participantsSnap.children.mapNotNull { it.key }.toSet()
+                            val pIdField = chatSnap.child("participantId").getValue(String::class.java) ?: ""
+                            val isMember = participantKeys.contains(curKey) ||
+                                pIdField == curId ||
+                                !participantsSnap.exists()
+
+                            if (!isMember && !isGroup) return@mapNotNull null
+
+                            val otherParticipantId = participantKeys.firstOrNull { it != curKey } ?: pIdField.ifBlank { chatId }
+                            val profilesSnap = chatSnap.child("participantProfiles")
+                            val otherProfile = profilesSnap.child(otherParticipantId)
+                            val matchedUser = _allUsers.value.find {
+                                FirebaseRtdbManager.sanitizeKey(it.id) == otherParticipantId || it.id == otherParticipantId
+                            }
+
+                            val displayName = if (isGroup) {
+                                chatSnap.child("groupTitle").getValue(String::class.java)
+                                    ?: chatSnap.child("name").getValue(String::class.java)
+                                    ?: "Blink Group"
+                            } else {
+                                matchedUser?.displayName
+                                    ?: otherProfile.child("displayName").getValue(String::class.java)
+                                    ?: chatSnap.child("name").getValue(String::class.java)
+                                    ?: "Blink User"
+                            }
+                            val username = if (isGroup) {
+                                chatSnap.child("username").getValue(String::class.java) ?: "group_chat"
+                            } else {
+                                matchedUser?.username
+                                    ?: otherProfile.child("username").getValue(String::class.java)
+                                    ?: chatSnap.child("username").getValue(String::class.java)
+                                    ?: otherParticipantId
+                            }
+                            val avatarColor = matchedUser?.avatarColorHex
+                                ?: otherProfile.child("avatarColorHex").getValue(String::class.java)
+                                ?: chatSnap.child("avatarColorHex").getValue(String::class.java)
+                                ?: "#8B5CF6"
+                            val lastMsg = chatSnap.child("lastMessage").getValue(String::class.java) ?: ""
+                            val lastTime = chatSnap.child("lastMessageTime").getValue(String::class.java) ?: "Just now"
+                            val isOnline = matchedUser?.isOnline
+                                ?: (chatSnap.child("isOnline").getValue(Boolean::class.java) ?: true)
+
+                            Conversation(
+                                id = chatSnap.child("id").getValue(String::class.java) ?: chatId,
+                                participantId = if (isGroup) chatId else (matchedUser?.id ?: otherParticipantId),
+                                name = displayName,
+                                username = username,
+                                avatarColorHex = avatarColor,
+                                lastMessage = lastMsg,
+                                lastMessageTime = lastTime,
+                                unreadCount = 0,
+                                isAiBot = false,
+                                streak = 1,
+                                isOnline = isOnline,
+                                isGroup = isGroup,
+                                groupTitle = chatSnap.child("groupTitle").getValue(String::class.java),
+                                groupMembers = chatSnap.child("groupMembers").children.mapNotNull { it.getValue(String::class.java) },
+                                memberNames = chatSnap.child("memberNames").children.mapNotNull { it.getValue(String::class.java) }
+                            )
+                        }
+
+                        if (remoteChats.isNotEmpty()) {
+                            _conversations.update { existing ->
+                                val map = existing.associateBy { it.id }.toMutableMap()
+                                remoteChats.forEach { remote ->
+                                    val prev = map[remote.id]
+                                    map[remote.id] = if (prev != null) {
+                                        prev.copy(
+                                            lastMessage = remote.lastMessage.ifBlank { prev.lastMessage },
+                                            lastMessageTime = remote.lastMessageTime.ifBlank { prev.lastMessageTime },
+                                            isOnline = remote.isOnline
+                                        )
+                                    } else {
+                                        remote
+                                    }
+                                }
+                                map.values.toList()
+                            }
+                            syncOfflineCache()
+                        }
+                    }
+
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.w("BlinkRepo", "RTDB chats listener cancelled: ${error.message}")
+                    }
+                }
+                chatsListener = listener
+                FirebaseRtdbManager.chatsRef(db).addValueEventListener(listener)
+            } catch (e: Exception) {
+                Log.w("BlinkRepo", "RTDB chats listener error: ${e.message}")
+            }
+        }
+
+        // 3. Sync blinks (posts & videos) across phones in real time
+        if (blinksListener == null) {
+            try {
+                val listener = object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val remotePosts = mutableListOf<Post>()
+                        val remoteVideos = mutableListOf<BlinkVideo>()
+                        for (snap in snapshot.children) {
+                            val id = snap.child("id").getValue(String::class.java) ?: snap.key ?: continue
+                            val type = snap.child("blinkType").getValue(String::class.java) ?: "post"
+                            val authorId = snap.child("authorId").getValue(String::class.java) ?: ""
+                            val authorName = snap.child("authorName").getValue(String::class.java) ?: "Blink Creator"
+                            val authorUsername = snap.child("authorUsername").getValue(String::class.java) ?: "creator"
+                            val caption = snap.child("caption").getValue(String::class.java) ?: ""
+                            val ts = (snap.child("timestamp").value as? Number)?.toLong() ?: System.currentTimeMillis()
+                            if (type == "video") {
+                                remoteVideos.add(
+                                    BlinkVideo(
+                                        id = id,
+                                        authorId = authorId,
+                                        authorName = authorName,
+                                        authorUsername = authorUsername,
+                                        title = snap.child("title").getValue(String::class.java) ?: "Blink Video ⚡",
+                                        caption = caption,
+                                        isBlink = snap.child("isBlink").getValue(Boolean::class.java) ?: true,
+                                        likesCount = (snap.child("likesCount").value as? Number)?.toInt() ?: 1,
+                                        thumbnailRes = R.drawable.feed_cyber_snap_1792586101459,
+                                        createdAtFormatted = formatTime(ts)
+                                    )
+                                )
+                            } else if (type == "post") {
+                                val imageUriRaw = snap.child("imageUri").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+                                remotePosts.add(
+                                    Post(
+                                        id = id,
+                                        authorId = authorId,
+                                        authorName = authorName,
+                                        authorUsername = authorUsername,
+                                        imageDrawableRes = if (imageUriRaw != null) null else R.drawable.feed_cyber_snap_1792586101459,
+                                        imageUri = imageUriRaw,
+                                        caption = caption,
+                                        filterTag = snap.child("filterTag").getValue(String::class.java) ?: "Normal",
+                                        timestamp = ts,
+                                        timeAgo = formatTime(ts),
+                                        likesCount = (snap.child("likesCount").value as? Number)?.toInt() ?: 1,
+                                        commentsCount = (snap.child("commentsCount").value as? Number)?.toInt() ?: 0
+                                    )
+                                )
+                            }
+                        }
+
+                        if (remotePosts.isNotEmpty()) {
+                            _posts.update { existing ->
+                                val map = existing.associateBy { it.id }.toMutableMap()
+                                remotePosts.forEach { if (!map.containsKey(it.id)) map[it.id] = it }
+                                map.values.sortedByDescending { it.timestamp }
+                            }
+                        }
+                        if (remoteVideos.isNotEmpty()) {
+                            _videos.update { existing ->
+                                val map = existing.associateBy { it.id }.toMutableMap()
+                                remoteVideos.forEach { if (!map.containsKey(it.id)) map[it.id] = it }
+                                map.values.toList()
+                            }
+                        }
+                    }
+
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.w("BlinkRepo", "RTDB blinks listener cancelled: ${error.message}")
+                    }
+                }
+                blinksListener = listener
+                FirebaseRtdbManager.blinksRef(db).addValueEventListener(listener)
+            } catch (e: Exception) {
+                Log.w("BlinkRepo", "RTDB blinks listener error: ${e.message}")
+            }
+        }
+    }
+
+    fun getOrCreateDirectChat(targetUser: User): Conversation {
+        val cur = _currentUser.value
+        val curId = cur?.id ?: "user_me"
+        val canonicalId = FirebaseRtdbManager.canonicalDirectChatId(curId, targetUser.id)
+        val existing = _conversations.value.find { conv ->
+            !conv.isGroup && (conv.id == canonicalId || conv.participantId == targetUser.id)
+        }
+        if (existing != null) {
+            return existing
+        }
+
+        val newConv = Conversation(
+            id = canonicalId,
+            participantId = targetUser.id,
+            name = targetUser.displayName,
+            username = targetUser.username,
+            avatarColorHex = targetUser.avatarColorHex,
+            lastMessage = "Started chat ⚡",
+            lastMessageTime = "Just now",
+            unreadCount = 0,
+            isOnline = targetUser.isOnline
+        )
+        _conversations.update { listOf(newConv) + it }
+
+        val db = rtdb
+        if (db != null) {
+            try {
+                val participantProfiles = buildMap<String, Map<String, Any?>> {
+                    if (cur != null) {
+                        put(
+                            FirebaseRtdbManager.sanitizeKey(cur.id),
+                            mapOf(
+                                "id" to cur.id,
+                                "displayName" to cur.displayName,
+                                "username" to cur.username,
+                                "avatarColorHex" to cur.avatarColorHex
+                            )
+                        )
+                    }
+                    put(
+                        FirebaseRtdbManager.sanitizeKey(targetUser.id),
+                        mapOf(
+                            "id" to targetUser.id,
+                            "displayName" to targetUser.displayName,
+                            "username" to targetUser.username,
+                            "avatarColorHex" to targetUser.avatarColorHex
+                        )
+                    )
+                }
+                FirebaseRtdbManager.chatsRef(db)
+                    .child(FirebaseRtdbManager.sanitizeKey(canonicalId))
+                    .updateChildren(
+                        FirebaseRtdbManager.chatToMap(
+                            conversation = newConv,
+                            participantIds = listOf(curId, targetUser.id),
+                            participantInfo = participantProfiles,
+                            lastSenderId = curId
+                        )
+                    )
+            } catch (e: Exception) {
+                Log.w("BlinkRepo", "RTDB getOrCreateDirectChat write failed: ${e.message}")
+            }
+        }
+        syncOfflineCache()
+        return newConv
+    }
+
     fun searchUsers(query: String): List<User> {
         val q = query.trim().removePrefix("@").lowercase()
         val curId = _currentUser.value?.id ?: ""
@@ -1879,7 +2253,6 @@ class BlinkRepository(private val context: Context? = null) {
         val cur = _currentUser.value ?: return false
         if (targetUser.id == cur.id) return false
 
-        // Check if request already pending or accepted
         val existing = _friendRequests.value.find {
             (it.senderId == cur.id && it.receiverId == targetUser.id) ||
             (it.senderId == targetUser.id && it.receiverId == cur.id)
@@ -1903,9 +2276,23 @@ class BlinkRepository(private val context: Context? = null) {
         _friendRequests.update { listOf(newReq) + it.filter { r -> r.id != newReq.id } }
 
         try {
-            firestoreDb?.collection("friend_requests")?.document(newReq.id)?.set(newReq.toMap())
+            val db = rtdb
+            if (db != null) {
+                val targetKey = FirebaseRtdbManager.sanitizeKey(targetUser.id)
+                val senderKey = FirebaseRtdbManager.sanitizeKey(cur.id)
+                FirebaseRtdbManager.usersRef(db)
+                    .child(targetKey)
+                    .child("friendRequests")
+                    .child(newReq.id)
+                    .setValue(newReq.toMap())
+                FirebaseRtdbManager.usersRef(db)
+                    .child(senderKey)
+                    .child("friendRequests")
+                    .child(newReq.id)
+                    .setValue(newReq.toMap())
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore friend request write: ${e.message}")
+            Log.w("BlinkRepo", "RTDB friend request write: ${e.message}")
         }
         return true
     }
@@ -1918,10 +2305,8 @@ class BlinkRepository(private val context: Context? = null) {
             list.map { if (it.id == requestId) it.copy(status = FriendRequest.STATUS_ACCEPTED) else it }
         }
 
-        // Increment friends count for current user
         _currentUser.update { it?.copy(friendsCount = it.friendsCount + 1) }
 
-        // Increment friends count for sender if in _allUsers
         _allUsers.update { list ->
             list.map {
                 when (it.id) {
@@ -1932,97 +2317,123 @@ class BlinkRepository(private val context: Context? = null) {
             }
         }
 
-        // Automatically start or ensure a conversation exists
         val senderUser = _allUsers.value.find { it.id == req.senderId }
-        if (senderUser != null) {
-            val existingConv = _conversations.value.find { it.participantId == senderUser.id }
-            if (existingConv == null) {
-                val newConv = Conversation(
-                    id = "conv_" + senderUser.id,
-                    participantId = senderUser.id,
-                    name = senderUser.displayName,
-                    username = senderUser.username,
-                    avatarColorHex = senderUser.avatarColorHex,
-                    lastMessage = "You are now connected! Say hi 👋",
-                    lastMessageTime = "Just now",
-                    unreadCount = 0,
-                    isOnline = senderUser.isOnline
-                )
-                _conversations.update { listOf(newConv) + it }
-            }
-        }
+            ?: User(
+                id = req.senderId,
+                username = req.senderUsername,
+                displayName = req.senderDisplayName.ifBlank { req.senderUsername },
+                avatarColorHex = req.senderAvatarColorHex
+            )
+        getOrCreateDirectChat(senderUser)
 
         try {
-            firestoreDb?.collection("friend_requests")?.document(requestId)?.update(
-                mapOf("status" to FriendRequest.STATUS_ACCEPTED)
-            )
+            val db = rtdb
+            if (db != null) {
+                val receiverKey = FirebaseRtdbManager.sanitizeKey(req.receiverId.ifBlank { cur.id })
+                val senderKey = FirebaseRtdbManager.sanitizeKey(req.senderId)
+                FirebaseRtdbManager.usersRef(db)
+                    .child(receiverKey)
+                    .child("friendRequests")
+                    .child(requestId)
+                    .child("status")
+                    .setValue(FriendRequest.STATUS_ACCEPTED)
+                if (senderKey.isNotBlank()) {
+                    FirebaseRtdbManager.usersRef(db)
+                        .child(senderKey)
+                        .child("friendRequests")
+                        .child(requestId)
+                        .child("status")
+                        .setValue(FriendRequest.STATUS_ACCEPTED)
+                }
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore friend request accept: ${e.message}")
+            Log.w("BlinkRepo", "RTDB friend request accept: ${e.message}")
         }
         return true
     }
 
     fun declineFriendRequest(requestId: String): Boolean {
+        val req = _friendRequests.value.find { it.id == requestId }
+        val curId = _currentUser.value?.id ?: "user_me"
         _friendRequests.update { list ->
             list.map { if (it.id == requestId) it.copy(status = FriendRequest.STATUS_DECLINED) else it }
         }
 
         try {
-            firestoreDb?.collection("friend_requests")?.document(requestId)?.update(
-                mapOf("status" to FriendRequest.STATUS_DECLINED)
-            )
+            val db = rtdb
+            if (db != null) {
+                val receiverKey = FirebaseRtdbManager.sanitizeKey(req?.receiverId ?: curId)
+                FirebaseRtdbManager.usersRef(db)
+                    .child(receiverKey)
+                    .child("friendRequests")
+                    .child(requestId)
+                    .child("status")
+                    .setValue(FriendRequest.STATUS_DECLINED)
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore friend request decline: ${e.message}")
+            Log.w("BlinkRepo", "RTDB friend request decline: ${e.message}")
         }
         return true
     }
 
-    fun listenToFirestoreFriendRequests() {
+    fun listenToRtdbFriendRequests(userId: String = _currentUser.value?.id ?: "user_me") {
         try {
-            val db = firestoreDb ?: return
-            db.collection("friend_requests")
-                .addSnapshotListener { snapshot, error ->
-                    if (error != null) {
-                        Log.w("BlinkRepo", "Friend requests listener error: ${error.message}")
-                        return@addSnapshotListener
-                    }
-                    if (snapshot != null && !snapshot.isEmpty) {
-                        val requests = snapshot.documents.mapNotNull { doc ->
-                            try {
-                                val id = doc.getString("id") ?: doc.id
-                                val senderId = doc.getString("senderId") ?: ""
-                                val senderUsername = doc.getString("senderUsername") ?: ""
-                                val senderDisplayName = doc.getString("senderDisplayName") ?: senderUsername
-                                val senderAvatar = doc.getString("senderAvatarColorHex") ?: "#8B5CF6"
-                                val receiverId = doc.getString("receiverId") ?: ""
-                                val receiverUsername = doc.getString("receiverUsername") ?: ""
-                                val status = doc.getString("status") ?: FriendRequest.STATUS_PENDING
-                                val ts = doc.getLong("timestamp") ?: System.currentTimeMillis()
-                                FriendRequest(
-                                    id = id,
-                                    senderId = senderId,
-                                    senderUsername = senderUsername,
-                                    senderDisplayName = senderDisplayName,
-                                    senderAvatarColorHex = senderAvatar,
-                                    receiverId = receiverId,
-                                    receiverUsername = receiverUsername,
-                                    status = status,
-                                    timestamp = ts
-                                )
-                            } catch (e: Exception) {
-                                null
-                            }
+            val db = rtdb ?: return
+            val userKey = FirebaseRtdbManager.sanitizeKey(userId)
+            val prevKey = activeFriendRequestUserId
+            if (prevKey == userKey && friendRequestsListener != null) return
+
+            if (prevKey != null && friendRequestsListener != null) {
+                FirebaseRtdbManager.usersRef(db).child(prevKey).child("friendRequests")
+                    .removeEventListener(friendRequestsListener!!)
+            }
+
+            val listener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val requests = snapshot.children.mapNotNull { doc ->
+                        try {
+                            val id = doc.child("id").getValue(String::class.java) ?: doc.key ?: return@mapNotNull null
+                            val senderId = doc.child("senderId").getValue(String::class.java) ?: ""
+                            val senderUsername = doc.child("senderUsername").getValue(String::class.java) ?: ""
+                            val senderDisplayName = doc.child("senderDisplayName").getValue(String::class.java) ?: senderUsername
+                            val senderAvatar = doc.child("senderAvatarColorHex").getValue(String::class.java) ?: "#8B5CF6"
+                            val receiverId = doc.child("receiverId").getValue(String::class.java) ?: ""
+                            val receiverUsername = doc.child("receiverUsername").getValue(String::class.java) ?: ""
+                            val status = doc.child("status").getValue(String::class.java) ?: FriendRequest.STATUS_PENDING
+                            val ts = (doc.child("timestamp").value as? Number)?.toLong() ?: System.currentTimeMillis()
+                            FriendRequest(
+                                id = id,
+                                senderId = senderId,
+                                senderUsername = senderUsername,
+                                senderDisplayName = senderDisplayName,
+                                senderAvatarColorHex = senderAvatar,
+                                receiverId = receiverId,
+                                receiverUsername = receiverUsername,
+                                status = status,
+                                timestamp = ts
+                            )
+                        } catch (_: Exception) {
+                            null
                         }
-                        if (requests.isNotEmpty()) {
-                            _friendRequests.update { current ->
-                                val map = (current + requests).associateBy { it.id }
-                                map.values.toList().sortedByDescending { it.timestamp }
-                            }
+                    }
+                    if (requests.isNotEmpty()) {
+                        _friendRequests.update { current ->
+                            val map = (current + requests).associateBy { it.id }
+                            map.values.toList().sortedByDescending { it.timestamp }
                         }
                     }
                 }
+
+                override fun onCancelled(error: DatabaseError) {
+                    Log.w("BlinkRepo", "Friend requests listener cancelled: ${error.message}")
+                }
+            }
+            activeFriendRequestUserId = userKey
+            friendRequestsListener = listener
+            FirebaseRtdbManager.usersRef(db).child(userKey).child("friendRequests")
+                .addValueEventListener(listener)
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "listenToFirestoreFriendRequests init error: ${e.message}")
+            Log.w("BlinkRepo", "listenToRtdbFriendRequests init error: ${e.message}")
         }
     }
 
@@ -2118,21 +2529,82 @@ class BlinkRepository(private val context: Context? = null) {
         }
     }
 
+    fun toggleFollowUser(targetUser: User) {
+        val cur = _currentUser.value ?: return
+        if (targetUser.id == cur.id || targetUser.username.equals(cur.username, ignoreCase = true)) return
+
+        val alreadyFollowing = _following.value.any {
+            it.id == targetUser.id || it.username.equals(targetUser.username, ignoreCase = true)
+        }
+        val updatedFollowing = if (alreadyFollowing) {
+            _following.value.filterNot {
+                it.id == targetUser.id || it.username.equals(targetUser.username, ignoreCase = true)
+            }
+        } else {
+            _following.value + targetUser
+        }
+        _following.value = updatedFollowing
+
+        _currentUser.update { user ->
+            user?.copy(followingCount = updatedFollowing.size)
+        }
+        _allUsers.update { list ->
+            list.map { if (it.id == cur.id) it.copy(followingCount = updatedFollowing.size) else it }
+        }
+        _notifications.update { list ->
+            list.map { notif ->
+                if (notif.actorUsername.equals(targetUser.username, ignoreCase = true) && notif.type == NotificationType.FOLLOW) {
+                    notif.copy(isFollowedBack = !alreadyFollowing)
+                } else notif
+            }
+        }
+    }
+
     fun toggleFollowBackNotification(notificationId: String) {
+        var targetUsername: String? = null
+        var targetName = ""
+        var targetColor = "#8B5CF6"
+        var shouldFollow = false
+
         _notifications.update { list ->
             list.map { notif ->
                 if (notif.id == notificationId) {
                     val newFollowedBack = !notif.isFollowedBack
-                    // Update user following count
-                    _currentUser.update { user ->
-                        user?.let {
-                            val change = if (newFollowedBack) 1 else -1
-                            it.copy(followingCount = (it.followingCount + change).coerceAtLeast(0))
-                        }
-                    }
+                    targetUsername = notif.actorUsername
+                    targetName = notif.actorName
+                    targetColor = notif.actorAvatarColor
+                    shouldFollow = newFollowedBack
                     notif.copy(isFollowedBack = newFollowedBack)
                 } else notif
             }
+        }
+
+        val username = targetUsername ?: return
+        val matchedUser = _allUsers.value.find { it.username.equals(username, ignoreCase = true) }
+            ?: User(
+                id = "user_$username",
+                username = username,
+                displayName = targetName.ifBlank { username },
+                email = "$username@blinkchat.com",
+                avatarColorHex = targetColor
+            )
+        val currentlyFollowing = _following.value.any {
+            it.id == matchedUser.id || it.username.equals(username, ignoreCase = true)
+        }
+        if (shouldFollow && !currentlyFollowing) {
+            _following.value = _following.value + matchedUser
+        } else if (!shouldFollow && currentlyFollowing) {
+            _following.value = _following.value.filterNot {
+                it.id == matchedUser.id || it.username.equals(username, ignoreCase = true)
+            }
+        }
+        val newFollowingCount = _following.value.size
+        _currentUser.update { user ->
+            user?.copy(followingCount = newFollowingCount)
+        }
+        _allUsers.update { list ->
+            val curId = _currentUser.value?.id
+            list.map { if (it.id == curId) it.copy(followingCount = newFollowingCount) else it }
         }
     }
 
@@ -2143,9 +2615,15 @@ class BlinkRepository(private val context: Context? = null) {
     }
 
     fun followCreator(creatorUsername: String) {
-        _currentUser.update { user ->
-            user?.copy(followingCount = user.followingCount + 1)
-        }
+        val target = _allUsers.value.find { it.username.equals(creatorUsername, ignoreCase = true) }
+            ?: User(
+                id = "user_$creatorUsername",
+                username = creatorUsername,
+                displayName = creatorUsername.replace("_", " ").replaceFirstChar { it.uppercase() },
+                email = "$creatorUsername@blinkchat.com",
+                avatarColorHex = "#8B5CF6"
+            )
+        toggleFollowUser(target)
     }
 
 
@@ -2172,20 +2650,26 @@ class BlinkRepository(private val context: Context? = null) {
             list.map { if (it.id == postId) it.copy(commentsCount = it.commentsCount + 1) else it }
         }
         try {
-            firestoreDb?.collection("comments")?.document(newComment.id)?.set(
-                mapOf(
-                    "id" to newComment.id,
-                    "postId" to postId,
-                    "authorId" to user.id,
-                    "authorName" to user.displayName,
-                    "authorUsername" to user.username,
-                    "text" to text.trim(),
-                    "likesCount" to 0,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
+            rtdb?.let { db ->
+                FirebaseRtdbManager.blinksRef(db)
+                    .child(postId)
+                    .child("comments")
+                    .child(newComment.id)
+                    .setValue(
+                        mapOf(
+                            "id" to newComment.id,
+                            "postId" to postId,
+                            "authorId" to user.id,
+                            "authorName" to user.displayName,
+                            "authorUsername" to user.username,
+                            "text" to text.trim(),
+                            "likesCount" to 0,
+                            "createdAt" to ServerValue.TIMESTAMP
+                        )
+                    )
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore comment write: ${e.message}")
+            Log.w("BlinkRepo", "RTDB comment write: ${e.message}")
         }
     }
 
@@ -2211,22 +2695,28 @@ class BlinkRepository(private val context: Context? = null) {
         _currentUser.update { it?.copy(postsCount = (it.postsCount) + 1) }
 
         try {
-            firestoreDb?.collection("posts")?.document(newPost.id)?.set(
-                mapOf(
-                    "id" to newPost.id,
-                    "authorId" to user.id,
-                    "authorName" to user.displayName,
-                    "authorUsername" to user.username,
-                    "caption" to caption,
-                    "filterTag" to filterTag,
-                    "imageUri" to (imageUri ?: ""),
-                    "likesCount" to 1,
-                    "commentsCount" to 0,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
+            rtdb?.let { db ->
+                FirebaseRtdbManager.blinksRef(db)
+                    .child(newPost.id)
+                    .setValue(
+                        mapOf(
+                            "id" to newPost.id,
+                            "blinkType" to "post",
+                            "authorId" to user.id,
+                            "authorName" to user.displayName,
+                            "authorUsername" to user.username,
+                            "caption" to caption,
+                            "filterTag" to filterTag,
+                            "imageUri" to (imageUri ?: ""),
+                            "likesCount" to 1,
+                            "commentsCount" to 0,
+                            "timestamp" to newPost.timestamp,
+                            "createdAt" to ServerValue.TIMESTAMP
+                        )
+                    )
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore post write: ${e.message}")
+            Log.w("BlinkRepo", "RTDB post write: ${e.message}")
         }
     }
 
@@ -2245,9 +2735,31 @@ class BlinkRepository(private val context: Context? = null) {
             isViewed = false
         )
         _stories.update { listOf(newStory) + it }
+        try {
+            rtdb?.let { db ->
+                FirebaseRtdbManager.blinksRef(db)
+                    .child(newStory.id)
+                    .setValue(
+                        mapOf(
+                            "id" to newStory.id,
+                            "blinkType" to "story",
+                            "authorId" to user.id,
+                            "authorName" to user.displayName,
+                            "authorUsername" to user.username,
+                            "caption" to caption,
+                            "filterTag" to filterTag,
+                            "imageUri" to (imageUri ?: ""),
+                            "timestamp" to newStory.timestamp,
+                            "createdAt" to ServerValue.TIMESTAMP
+                        )
+                    )
+            }
+        } catch (e: Exception) {
+            Log.w("BlinkRepo", "RTDB story write: ${e.message}")
+        }
     }
 
-    // --- Group Chat Creation (Firestore backed) ---
+    // --- Group Chat Creation (Realtime Database backed) ---
     fun createGroupChat(groupTitle: String, participantIds: List<String>): Conversation {
         val curUser = _currentUser.value ?: return _conversations.value.first()
         val allParticipantIds = (participantIds + curUser.id).distinct()
@@ -2276,44 +2788,55 @@ class BlinkRepository(private val context: Context? = null) {
 
         // Initial welcome message
         val initMsgId = "m_g_" + UUID.randomUUID().toString().take(8)
+        val initNow = System.currentTimeMillis()
         val initMsg = ChatMessage(
             id = initMsgId,
             conversationId = groupId,
             senderId = curUser.id,
             senderName = curUser.displayName,
             text = "⚡ Welcome everyone to $cleanTitle! Share your live Blinks and photos here.",
-            timeFormatted = "Just now",
+            timestamp = initNow,
+            timeFormatted = formatTime(initNow),
             isFromMe = true
         )
         _messages.update { map ->
             map + (groupId to listOf(initMsg))
         }
 
-        // Sync group to Firestore
+        // Sync group to Realtime Database nodes "chats" and "messages"
         try {
-            firestoreDb?.collection("groups")?.document(groupId)?.set(
-                mapOf(
-                    "id" to groupId,
-                    "title" to cleanTitle,
-                    "createdBy" to curUser.id,
-                    "participantIds" to allParticipantIds,
-                    "memberNames" to memberDisplayNames,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
-            firestoreDb?.collection("messages")?.document(initMsgId)?.set(
-                mapOf(
-                    "id" to initMsgId,
-                    "conversationId" to groupId,
-                    "senderId" to curUser.id,
-                    "senderName" to curUser.displayName,
-                    "text" to initMsg.text,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
+            rtdb?.let { db ->
+                FirebaseRtdbManager.chatsRef(db)
+                    .child(groupId)
+                    .setValue(
+                        FirebaseRtdbManager.chatToMap(
+                            conversation = groupConv,
+                            participantIds = allParticipantIds,
+                            lastSenderId = curUser.id
+                        )
+                    )
+                FirebaseRtdbManager.chatMessagesRef(db, groupId)
+                    .child(initMsgId)
+                    .setValue(
+                        FirebaseRtdbManager.messageToMap(
+                            msgId = initMsgId,
+                            conversationId = groupId,
+                            senderId = curUser.id,
+                            senderName = curUser.displayName,
+                            text = initMsg.text,
+                            mediaUri = null,
+                            mediaType = "none",
+                            isBlink = false,
+                            blinkSecondsRemaining = 0,
+                            timestamp = initNow,
+                            timeFormatted = initMsg.timeFormatted
+                        )
+                    )
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore createGroup error: ${e.message}")
+            Log.w("BlinkRepo", "RTDB createGroup error: ${e.message}")
         }
+        syncOfflineCache()
         return groupConv
     }
 
@@ -2325,6 +2848,7 @@ class BlinkRepository(private val context: Context? = null) {
         _allUsers.update { list ->
             list.map { if (it.id == updated.id) updated else it }
         }
+        syncUserToRtdb(updated)
     }
 
     // --- Chat & Messages ---
@@ -2333,10 +2857,11 @@ class BlinkRepository(private val context: Context? = null) {
         text: String,
         isBlink: Boolean = false,
         mediaType: String = "none",
-        mediaUri: String? = null
+        mediaUri: String? = null,
+        messageId: String = "m_" + UUID.randomUUID().toString().take(8)
     ) {
         val user = _currentUser.value ?: return
-        val msgId = "m_" + UUID.randomUUID().toString().take(8)
+        val msgId = messageId
         val now = System.currentTimeMillis()
         val timeFormatted = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(now))
         val newMsg = ChatMessage(
@@ -2379,66 +2904,91 @@ class BlinkRepository(private val context: Context? = null) {
             }
         }
 
-        // Sync with Firestore collection "messages"
+        // Sync with Realtime Database nodes "messages/{chatId}" and "chats/{chatId}"
         try {
-            val db = firestoreDb
+            val db = rtdb
             if (db != null) {
-                val messageMap = hashMapOf(
-                    "id" to msgId,
-                    "conversationId" to conversationId,
-                    "senderId" to user.id,
-                    "senderName" to user.displayName,
-                    "text" to text,
-                    "mediaUri" to mediaUri,
-                    "mediaType" to mediaType,
-                    "isBlink" to isBlink,
-                    "blinkSecondsRemaining" to (if (isBlink) 10 else 0),
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "timestamp" to now,
-                    "timeFormatted" to timeFormatted,
-                    "readAt" to null,
-                    "isRead" to false
+                val messageMap = FirebaseRtdbManager.messageToMap(
+                    msgId = msgId,
+                    conversationId = conversationId,
+                    senderId = user.id,
+                    senderName = user.displayName,
+                    text = text,
+                    mediaUri = mediaUri,
+                    mediaType = mediaType,
+                    isBlink = isBlink,
+                    blinkSecondsRemaining = if (isBlink) 10 else 0,
+                    timestamp = now,
+                    timeFormatted = timeFormatted
                 )
-                db.collection("messages").document(msgId).set(messageMap)
+                FirebaseRtdbManager.chatMessagesRef(db, conversationId)
+                    .child(msgId)
+                    .setValue(messageMap)
                     .addOnFailureListener { e ->
-                        Log.w("BlinkRepo", "Firestore sendMessage failed: ${e.message}")
+                        Log.w("BlinkRepo", "RTDB sendMessage failed: ${e.message}")
                     }
+
+                val targetConv = _conversations.value.find { it.id == conversationId }
+                if (targetConv != null) {
+                    FirebaseRtdbManager.chatsRef(db)
+                        .child(FirebaseRtdbManager.sanitizeKey(conversationId))
+                        .updateChildren(
+                            FirebaseRtdbManager.chatToMap(
+                                conversation = targetConv.copy(
+                                    lastMessage = previewText,
+                                    lastMessageTime = timeFormatted
+                                ),
+                                participantIds = listOf(user.id, targetConv.participantId),
+                                lastSenderId = user.id
+                            )
+                        )
+                }
             }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore sendMessage exception: ${e.message}")
+            Log.w("BlinkRepo", "RTDB sendMessage exception: ${e.message}")
         }
+        syncOfflineCache()
 
-        // If message is to Blink AI, generate smart response with real-time typing indicator synced to Firestore!
+        // If message is to Blink AI, generate smart response with real-time typing indicator synced to RTDB!
         val conv = _conversations.value.find { it.id == conversationId }
         if (conv?.isAiBot == true) {
             scope.launch {
-                val db = firestoreDb
+                val db = rtdb
                 val aiId = "user_ai"
-                val typingDocId = "${conversationId}_$aiId"
 
                 // 1. Mark user's message as read by Blink AI
                 try {
-                    db?.collection("messages")?.document(msgId)?.update(
-                        mapOf(
-                            "readAt" to FieldValue.serverTimestamp(),
-                            "isRead" to true
-                        )
-                    )
+                    if (db != null) {
+                        FirebaseRtdbManager.chatMessagesRef(db, conversationId)
+                            .child(msgId)
+                            .updateChildren(
+                                mapOf(
+                                    "readAt" to System.currentTimeMillis(),
+                                    "isRead" to true
+                                )
+                            )
+                    }
                 } catch (e: Exception) {
                     Log.w("BlinkRepo", "AI readAt update failed: ${e.message}")
                 }
 
-                // 2. Sync typing status: start typing in Firestore
+                // 2. Sync typing status: start typing in RTDB
                 try {
-                    db?.collection("typing_indicators")?.document(typingDocId)?.set(
-                        hashMapOf(
-                            "conversationId" to conversationId,
-                            "userId" to aiId,
-                            "userName" to (conv.name.ifBlank { "Blink AI" }),
-                            "isTyping" to true,
-                            "updatedAt" to System.currentTimeMillis()
-                        )
-                    )
+                    if (db != null) {
+                        FirebaseRtdbManager.chatsRef(db)
+                            .child(FirebaseRtdbManager.sanitizeKey(conversationId))
+                            .child("typing")
+                            .child(aiId)
+                            .setValue(
+                                hashMapOf(
+                                    "conversationId" to conversationId,
+                                    "userId" to aiId,
+                                    "userName" to (conv.name.ifBlank { "Blink AI" }),
+                                    "isTyping" to true,
+                                    "updatedAt" to System.currentTimeMillis()
+                                )
+                            )
+                    }
                 } catch (e: Exception) {
                     Log.w("BlinkRepo", "Failed to start AI typing: ${e.message}")
                 }
@@ -2446,16 +2996,18 @@ class BlinkRepository(private val context: Context? = null) {
                 // Realistic typing delay
                 delay(1600)
 
-                val currentHistory = (_messages.value[conversationId] ?: emptyList()).map { 
-                    it.text to it.isFromMe 
+                val currentHistory = (_messages.value[conversationId] ?: emptyList()).map {
+                    it.text to it.isFromMe
                 }
                 val aiReply = BlinkAiService.getAiResponse(text, currentHistory)
                 val nowAi = System.currentTimeMillis()
                 val aiTime = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(nowAi))
+                val aiMsgId = "m_ai_" + UUID.randomUUID().toString().take(8)
                 val aiMsg = ChatMessage(
-                    id = "m_ai_" + UUID.randomUUID().toString().take(8),
+                    id = aiMsgId,
                     conversationId = conversationId,
                     senderId = aiId,
+                    senderName = conv.name.ifBlank { "Blink AI" },
                     text = aiReply,
                     timestamp = nowAi,
                     timeFormatted = aiTime,
@@ -2473,146 +3025,130 @@ class BlinkRepository(private val context: Context? = null) {
                     }
                 }
 
-                // 2. Sync typing status: stop typing in Firestore
                 try {
-                    db?.collection("typing_indicators")?.document(typingDocId)?.set(
-                        hashMapOf(
-                            "conversationId" to conversationId,
-                            "userId" to aiId,
-                            "userName" to (conv.name.ifBlank { "Blink AI" }),
-                            "isTyping" to false,
-                            "updatedAt" to System.currentTimeMillis()
-                        )
-                    )
+                    if (db != null) {
+                        FirebaseRtdbManager.chatMessagesRef(db, conversationId)
+                            .child(aiMsgId)
+                            .setValue(
+                                FirebaseRtdbManager.messageToMap(
+                                    msgId = aiMsgId,
+                                    conversationId = conversationId,
+                                    senderId = aiId,
+                                    senderName = conv.name.ifBlank { "Blink AI" },
+                                    text = aiReply,
+                                    mediaUri = null,
+                                    mediaType = "none",
+                                    isBlink = false,
+                                    blinkSecondsRemaining = 0,
+                                    timestamp = nowAi,
+                                    timeFormatted = aiTime
+                                )
+                            )
+                        // Stop typing in RTDB
+                        FirebaseRtdbManager.chatsRef(db)
+                            .child(FirebaseRtdbManager.sanitizeKey(conversationId))
+                            .child("typing")
+                            .child(aiId)
+                            .setValue(
+                                hashMapOf(
+                                    "conversationId" to conversationId,
+                                    "userId" to aiId,
+                                    "userName" to (conv.name.ifBlank { "Blink AI" }),
+                                    "isTyping" to false,
+                                    "updatedAt" to System.currentTimeMillis()
+                                )
+                            )
+                    }
                 } catch (e: Exception) {
                     Log.w("BlinkRepo", "Failed to stop AI typing: ${e.message}")
                 }
+                syncOfflineCache()
             }
         }
     }
 
     /**
-     * Attaches a real-time Firestore listener for messages in the specified conversation.
-     * Merges incoming Firestore messages into the repository state flow.
+     * Attaches a real-time Firebase Realtime Database listener for messages in the specified conversation.
+     * Merges incoming RTDB messages into the repository state flow.
      */
-    fun observeFirestoreMessages(
+    fun observeRtdbMessages(
         conversationId: String,
         onMessagesUpdated: ((List<ChatMessage>) -> Unit)? = null
-    ): com.google.firebase.firestore.ListenerRegistration? {
-        val db = firestoreDb ?: return null
+    ): Pair<DatabaseReference, ValueEventListener>? {
+        val db = rtdb ?: return null
         return try {
-            db.collection("messages")
-                .whereEqualTo("conversationId", conversationId)
-                .addSnapshotListener { snapshot, error ->
-                    if (error != null) {
-                        Log.w("BlinkRepo", "Firestore messages listener error: ${error.message}")
-                        return@addSnapshotListener
-                    }
-                    if (snapshot != null && !snapshot.isEmpty) {
-                        val curUserId = _currentUser.value?.id ?: "user_me"
-                        val firestoreMsgs = snapshot.documents.mapNotNull { doc ->
-                            val id = doc.getString("id") ?: doc.id
-                            val senderId = doc.getString("senderId") ?: ""
-                            val text = doc.getString("text") ?: ""
-                            val mediaUri = doc.getString("mediaUri")
-                            val mediaType = doc.getString("mediaType") ?: "none"
-                            val isBlink = doc.getBoolean("isBlink") ?: false
-                            val blinkSeconds = doc.getLong("blinkSecondsRemaining")?.toInt() ?: 10
-                            val ts = doc.getTimestamp("createdAt")?.toDate()?.time
-                                ?: doc.getLong("timestamp")
-                                ?: System.currentTimeMillis()
-                            val reactionStr = doc.getString("reaction")
-                            val reactionsRaw = doc.get("reactions") as? Map<*, *>
-                            val parsedReactions: Map<String, List<String>> = if (reactionsRaw != null) {
-                                reactionsRaw.mapNotNull { (k, v) ->
-                                    val emojiKey = k as? String ?: return@mapNotNull null
-                                    val usersList = (v as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-                                    if (usersList.isNotEmpty()) emojiKey to usersList else null
-                                }.toMap()
-                            } else if (!reactionStr.isNullOrBlank()) {
-                                mapOf(reactionStr to listOf(senderId))
-                            } else {
-                                emptyMap()
-                            }
-                            val readAtTs = doc.getTimestamp("readAt")?.toDate()?.time
-                                ?: doc.getLong("readAt")
-                            val isRead = (readAtTs != null) || (doc.getBoolean("isRead") ?: false)
-                            ChatMessage(
-                                id = id,
-                                conversationId = conversationId,
-                                senderId = senderId,
-                                text = text,
-                                mediaUri = mediaUri,
-                                mediaType = mediaType,
-                                timestamp = ts,
-                                timeFormatted = formatTime(ts),
-                                isBlink = isBlink,
-                                blinkSecondsRemaining = blinkSeconds,
-                                isFromMe = (senderId == curUserId),
-                                isRead = isRead,
-                                readAt = readAtTs,
-                                reaction = reactionStr ?: parsedReactions.keys.firstOrNull(),
-                                reactions = parsedReactions
-                            )
-                        }.sortedBy { it.timestamp }
+            val ref = FirebaseRtdbManager.chatMessagesRef(db, conversationId)
+            ref.keepSynced(true)
+            val listener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val curUserId = _currentUser.value?.id ?: "user_me"
+                    val rtdbMsgs = snapshot.children.mapNotNull { doc ->
+                        FirebaseRtdbManager.parseMessageSnapshot(doc, conversationId, curUserId)
+                    }.sortedBy { it.timestamp }
 
+                    if (rtdbMsgs.isNotEmpty()) {
                         _messages.update { map ->
                             val existing = map[conversationId] ?: emptyList()
-                            val firestoreIds = firestoreMsgs.map { it.id }.toSet()
-                            val localOnly = existing.filter { it.id !in firestoreIds }
-                            (localOnly + firestoreMsgs).sortedBy { it.timestamp }.let { merged ->
+                            val rtdbIds = rtdbMsgs.map { it.id }.toSet()
+                            val localOnly = existing.filter { it.id !in rtdbIds }
+                            (localOnly + rtdbMsgs).sortedBy { it.timestamp }.let { merged ->
                                 map + (conversationId to merged)
                             }
                         }
-                        onMessagesUpdated?.invoke(firestoreMsgs)
+                        syncOfflineCache()
+                        onMessagesUpdated?.invoke(rtdbMsgs)
                     }
                 }
+
+                override fun onCancelled(error: DatabaseError) {
+                    Log.w("BlinkRepo", "RTDB messages listener cancelled: ${error.message}")
+                }
+            }
+            ref.orderByChild("timestamp").addValueEventListener(listener)
+            ref to listener
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Failed to register observeFirestoreMessages: ${e.message}")
+            Log.w("BlinkRepo", "Failed to register observeRtdbMessages: ${e.message}")
             null
         }
     }
 
     /**
-     * Marks all unread messages from other participants as read with a readAt timestamp in Firestore.
+     * Marks all unread messages from other participants as read with a readAt timestamp in Realtime Database.
      */
     fun markConversationAsRead(
         conversationId: String,
         currentUserId: String = _currentUser.value?.id ?: "user_me"
     ) {
-        val db = firestoreDb ?: return
+        val db = rtdb ?: return
         try {
-            db.collection("messages")
-                .whereEqualTo("conversationId", conversationId)
-                .get()
-                .addOnSuccessListener { snapshot ->
-                    val unreadDocs = snapshot.documents.filter { doc ->
-                        val sId = doc.getString("senderId") ?: ""
-                        sId.isNotBlank() && sId != currentUserId && doc.get("readAt") == null
-                    }
-                    if (unreadDocs.isNotEmpty()) {
-                        val batch = db.batch()
-                        for (doc in unreadDocs) {
-                            batch.update(doc.reference, mapOf(
-                                "readAt" to FieldValue.serverTimestamp(),
-                                "isRead" to true
-                            ))
-                        }
-                        batch.commit().addOnFailureListener { e ->
-                            Log.w("BlinkRepo", "markConversationAsRead batch commit error: ${e.message}")
-                        }
+            val ref = FirebaseRtdbManager.chatMessagesRef(db, conversationId)
+            ref.get().addOnSuccessListener { snapshot ->
+                val now = System.currentTimeMillis()
+                val updates = hashMapOf<String, Any?>()
+                for (child in snapshot.children) {
+                    val key = child.key ?: continue
+                    val sId = child.child("senderId").getValue(String::class.java) ?: ""
+                    val rAt = child.child("readAt").value
+                    if (sId.isNotBlank() && sId != currentUserId && rAt == null) {
+                        updates["$key/readAt"] = now
+                        updates["$key/isRead"] = true
                     }
                 }
-                .addOnFailureListener { e ->
-                    Log.w("BlinkRepo", "markConversationAsRead get error: ${e.message}")
+                if (updates.isNotEmpty()) {
+                    ref.updateChildren(updates).addOnFailureListener { e ->
+                        Log.w("BlinkRepo", "markConversationAsRead update error: ${e.message}")
+                    }
                 }
+            }.addOnFailureListener { e ->
+                Log.w("BlinkRepo", "markConversationAsRead get error: ${e.message}")
+            }
         } catch (e: Exception) {
             Log.w("BlinkRepo", "markConversationAsRead exception: ${e.message}")
         }
     }
 
     /**
-     * Toggles an emoji reaction on a message in real-time, syncing to Cloud Firestore
+     * Toggles an emoji reaction on a message in real-time, syncing to Firebase Realtime Database
      * and optimistically updating local message state.
      */
     fun toggleMessageReaction(
@@ -2652,23 +3188,26 @@ class BlinkRepository(private val context: Context? = null) {
             map + (conversationId to updatedList)
         }
 
-        // Sync to Firestore messages collection
+        // Sync to Realtime Database messages/{chatId}/{messageId}
         try {
-            val db = firestoreDb
+            val db = rtdb
             if (db != null) {
-                db.collection("messages").document(messageId).set(
-                    mapOf(
-                        "reactions" to updatedReactionsMap,
-                        "reaction" to updatedPrimaryReaction
-                    ),
-                    com.google.firebase.firestore.SetOptions.merge()
-                ).addOnFailureListener { e ->
-                    Log.w("BlinkRepo", "Failed to sync reaction to Firestore: ${e.message}")
-                }
+                FirebaseRtdbManager.chatMessagesRef(db, conversationId)
+                    .child(messageId)
+                    .updateChildren(
+                        mapOf(
+                            "reactions" to updatedReactionsMap,
+                            "reaction" to updatedPrimaryReaction
+                        )
+                    )
+                    .addOnFailureListener { e ->
+                        Log.w("BlinkRepo", "Failed to sync reaction to RTDB: ${e.message}")
+                    }
             }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore toggle reaction error: ${e.message}")
+            Log.w("BlinkRepo", "RTDB toggle reaction error: ${e.message}")
         }
+        syncOfflineCache()
     }
 
     fun startCall(targetUser: User, isVideo: Boolean) {
@@ -2711,11 +3250,32 @@ class BlinkRepository(private val context: Context? = null) {
             displayName = user.displayName,
             avatarColorHex = user.avatarColorHex
         )
-        _blockedUsers.update { it + blocked }
-        // Filter out posts and conversations from this user
-        _posts.update { list -> list.filter { it.authorId != user.id } }
-        _conversations.update { list -> list.filter { it.participantId != user.id } }
-        _stories.update { list -> list.filter { it.userId != user.id } }
+        _blockedUsers.update { list ->
+            if (list.any { it.userId == user.id || it.username.equals(user.username, ignoreCase = true) }) list
+            else list + blocked
+        }
+        // Filter out posts, conversations, stories, and follow connections for this user
+        _posts.update { list ->
+            list.filter { it.authorId != user.id && !it.authorUsername.equals(user.username, ignoreCase = true) }
+        }
+        _conversations.update { list ->
+            list.filter { it.participantId != user.id && !it.username.equals(user.username, ignoreCase = true) }
+        }
+        _stories.update { list ->
+            list.filter { it.userId != user.id && !it.username.equals(user.username, ignoreCase = true) }
+        }
+        _followers.update { list ->
+            list.filter { it.id != user.id && !it.username.equals(user.username, ignoreCase = true) }
+        }
+        _following.update { list ->
+            list.filter { it.id != user.id && !it.username.equals(user.username, ignoreCase = true) }
+        }
+        _currentUser.update { cur ->
+            cur?.copy(
+                followersCount = _followers.value.size,
+                followingCount = _following.value.size
+            )
+        }
     }
 
     fun unblockUser(userId: String) {
@@ -2740,19 +3300,24 @@ class BlinkRepository(private val context: Context? = null) {
         _reports.update { it + report }
 
         try {
-            firestoreDb?.collection("reports")?.document(report.id)?.set(
-                mapOf(
-                    "id" to report.id,
-                    "reporterId" to user.id,
-                    "targetUserId" to (targetUserId ?: ""),
-                    "targetPostId" to (targetPostId ?: ""),
-                    "reason" to reason.name,
-                    "details" to details,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
+            rtdb?.let { db ->
+                FirebaseRtdbManager.reportsRef(db)
+                    .child(report.id)
+                    .setValue(
+                        mapOf(
+                            "id" to report.id,
+                            "reporterId" to user.id,
+                            "targetUserId" to (targetUserId ?: ""),
+                            "targetPostId" to (targetPostId ?: ""),
+                            "reason" to reason.name,
+                            "details" to details,
+                            "timestamp" to report.timestamp,
+                            "createdAt" to ServerValue.TIMESTAMP
+                        )
+                    )
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore report write: ${e.message}")
+            Log.w("BlinkRepo", "RTDB report write: ${e.message}")
         }
     }
 
@@ -2846,21 +3411,27 @@ class BlinkRepository(private val context: Context? = null) {
         _currentUser.update { it?.copy(postsCount = (it.postsCount) + 1) }
 
         try {
-            firestoreDb?.collection("videos")?.document(newVideo.id)?.set(
-                mapOf(
-                    "id" to newVideo.id,
-                    "authorId" to user.id,
-                    "authorName" to user.displayName,
-                    "authorUsername" to user.username,
-                    "title" to newVideo.title,
-                    "caption" to caption,
-                    "isBlink" to isBlink,
-                    "likesCount" to 1,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
+            rtdb?.let { db ->
+                FirebaseRtdbManager.blinksRef(db)
+                    .child(newVideo.id)
+                    .setValue(
+                        mapOf(
+                            "id" to newVideo.id,
+                            "blinkType" to "video",
+                            "authorId" to user.id,
+                            "authorName" to user.displayName,
+                            "authorUsername" to user.username,
+                            "title" to newVideo.title,
+                            "caption" to caption,
+                            "isBlink" to isBlink,
+                            "likesCount" to 1,
+                            "timestamp" to System.currentTimeMillis(),
+                            "createdAt" to ServerValue.TIMESTAMP
+                        )
+                    )
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore video write: ${e.message}")
+            Log.w("BlinkRepo", "RTDB video write: ${e.message}")
         }
 
         return newVideo
@@ -2900,9 +3471,9 @@ class BlinkRepository(private val context: Context? = null) {
     val randomChatMessages: StateFlow<List<RandomChatMessage>> = _randomChatMessages.asStateFlow()
 
     private var myQueueEntryId: String? = null
-    private var queueListener: ListenerRegistration? = null
-    private var messagesListener: ListenerRegistration? = null
-    private var chatDocListener: ListenerRegistration? = null
+    private var queueListener: Pair<DatabaseReference, ValueEventListener>? = null
+    private var messagesListener: Pair<DatabaseReference, ValueEventListener>? = null
+    private var chatDocListener: Pair<DatabaseReference, ValueEventListener>? = null
     private var matchingFallbackJob: Job? = null
     private var simulatedChatJob: Job? = null
 
@@ -2914,26 +3485,22 @@ class BlinkRepository(private val context: Context? = null) {
         val myEntryId = "q_" + UUID.randomUUID().toString().take(8)
         myQueueEntryId = myEntryId
 
-        val db = firestoreDb
+        val db = rtdb
         if (db != null) {
             try {
-                // Look for an existing waiting peer in match_queue
-                db.collection("match_queue")
-                    .whereEqualTo("status", "waiting")
-                    .limit(5)
-                    .get()
+                val queueRootRef = FirebaseRtdbManager.chatsRef(db).child("_match_queue")
+                queueRootRef.orderByChild("status").equalTo("waiting").limitToFirst(5).get()
                     .addOnSuccessListener { snapshot ->
-                        val peerDoc = snapshot.documents.firstOrNull { doc ->
-                            doc.getString("anonymousId") != anonymousUserId &&
-                            doc.getString("status") == "waiting"
+                        val peerDoc = snapshot.children.firstOrNull { doc ->
+                            doc.child("anonymousId").getValue(String::class.java) != anonymousUserId &&
+                            doc.child("status").getValue(String::class.java) == "waiting"
                         }
 
                         if (peerDoc != null) {
-                            // Match with waiting peer!
-                            val peerId = peerDoc.getString("anonymousId") ?: "peer_anon"
-                            val peerName = peerDoc.getString("anonymousName") ?: "Anonymous Blink"
-                            val peerAvatar = peerDoc.getString("anonymousAvatarColor") ?: "#06B6D4"
-                            val chatId = "chat_" + UUID.randomUUID().toString().take(10)
+                            val peerId = peerDoc.child("anonymousId").getValue(String::class.java) ?: "peer_anon"
+                            val peerName = peerDoc.child("anonymousName").getValue(String::class.java) ?: "Anonymous Blink"
+                            val peerAvatar = peerDoc.child("anonymousAvatarColor").getValue(String::class.java) ?: "#06B6D4"
+                            val chatId = "rand_" + UUID.randomUUID().toString().take(10)
 
                             val newChat = ActiveRandomChat(
                                 id = chatId,
@@ -2948,10 +3515,10 @@ class BlinkRepository(private val context: Context? = null) {
                                 expiresAt = System.currentTimeMillis() + 120_000L
                             )
 
-                            // 1. Create active_chat doc
-                            db.collection("active_chats").document(chatId).set(
+                            FirebaseRtdbManager.chatsRef(db).child(chatId).setValue(
                                 mapOf(
                                     "id" to chatId,
+                                    "type" to "random",
                                     "participantA" to peerId,
                                     "participantB" to anonymousUserId,
                                     "participantAName" to peerName,
@@ -2964,8 +3531,7 @@ class BlinkRepository(private val context: Context? = null) {
                                 )
                             )
 
-                            // 2. Notify peer
-                            peerDoc.reference.update(
+                            peerDoc.ref.updateChildren(
                                 mapOf(
                                     "status" to "matched",
                                     "matchedChatId" to chatId,
@@ -2974,10 +3540,8 @@ class BlinkRepository(private val context: Context? = null) {
                                 )
                             )
 
-                            // 3. Join chat directly
                             joinActiveRandomChat(newChat)
                         } else {
-                            // Put myself in queue
                             val myData = mapOf(
                                 "id" to myEntryId,
                                 "anonymousId" to anonymousUserId,
@@ -2986,17 +3550,17 @@ class BlinkRepository(private val context: Context? = null) {
                                 "status" to "waiting",
                                 "joinedAt" to System.currentTimeMillis()
                             )
-                            db.collection("match_queue").document(myEntryId).set(myData)
+                            val myEntryRef = queueRootRef.child(myEntryId)
+                            myEntryRef.setValue(myData)
 
-                            // Listen for match confirmation on my queue entry
-                            queueListener = db.collection("match_queue").document(myEntryId)
-                                .addSnapshotListener { docSnap, error ->
-                                    if (error != null || docSnap == null || !docSnap.exists()) return@addSnapshotListener
-                                    val status = docSnap.getString("status")
-                                    val matchedChatId = docSnap.getString("matchedChatId")
+                            val qListener = object : ValueEventListener {
+                                override fun onDataChange(docSnap: DataSnapshot) {
+                                    if (!docSnap.exists()) return
+                                    val status = docSnap.child("status").getValue(String::class.java)
+                                    val matchedChatId = docSnap.child("matchedChatId").getValue(String::class.java)
                                     if (status == "matched" && !matchedChatId.isNullOrBlank()) {
-                                        val peerName = docSnap.getString("peerAnonymousName") ?: "Anonymous Partner"
-                                        val peerAvatar = docSnap.getString("peerAvatarColor") ?: "#06B6D4"
+                                        val peerName = docSnap.child("peerAnonymousName").getValue(String::class.java) ?: "Anonymous Partner"
+                                        val peerAvatar = docSnap.child("peerAvatarColor").getValue(String::class.java) ?: "#06B6D4"
                                         val matchedChat = ActiveRandomChat(
                                             id = matchedChatId,
                                             participantA = anonymousUserId,
@@ -3013,7 +3577,11 @@ class BlinkRepository(private val context: Context? = null) {
                                     }
                                 }
 
-                            // Responsive fallback for single-user live emulator preview
+                                override fun onCancelled(error: DatabaseError) {}
+                            }
+                            myEntryRef.addValueEventListener(qListener)
+                            queueListener = myEntryRef to qListener
+
                             startFallbackPairingTimer()
                         }
                     }
@@ -3032,11 +3600,11 @@ class BlinkRepository(private val context: Context? = null) {
     private fun startFallbackPairingTimer() {
         matchingFallbackJob?.cancel()
         matchingFallbackJob = scope.launch {
-            delay(2800) // Realistic 2.8s radar search
+            delay(2800)
             if (_randomMatchState.value == MatchState.SEARCHING) {
                 val partnerName = getRandomAnonymousName(exclude = anonymousUserName)
                 val partnerAvatar = getRandomAvatarColor()
-                val chatId = "chat_sim_" + UUID.randomUUID().toString().take(8)
+                val chatId = "rand_sim_" + UUID.randomUUID().toString().take(8)
 
                 val simulatedChat = ActiveRandomChat(
                     id = chatId,
@@ -3051,20 +3619,22 @@ class BlinkRepository(private val context: Context? = null) {
                     expiresAt = System.currentTimeMillis() + 120_000L
                 )
 
-                // Also persist in Firestore active_chats if online
                 try {
-                    firestoreDb?.collection("active_chats")?.document(chatId)?.set(
-                        mapOf(
-                            "id" to chatId,
-                            "participantA" to simulatedChat.participantA,
-                            "participantB" to simulatedChat.participantB,
-                            "participantAName" to simulatedChat.participantAName,
-                            "participantBName" to simulatedChat.participantBName,
-                            "status" to "active",
-                            "createdAt" to simulatedChat.createdAt,
-                            "expiresAt" to simulatedChat.expiresAt
+                    rtdb?.let { db ->
+                        FirebaseRtdbManager.chatsRef(db).child(chatId).setValue(
+                            mapOf(
+                                "id" to chatId,
+                                "type" to "random",
+                                "participantA" to simulatedChat.participantA,
+                                "participantB" to simulatedChat.participantB,
+                                "participantAName" to simulatedChat.participantAName,
+                                "participantBName" to simulatedChat.participantBName,
+                                "status" to "active",
+                                "createdAt" to simulatedChat.createdAt,
+                                "expiresAt" to simulatedChat.expiresAt
+                            )
                         )
-                    )
+                    }
                 } catch (_: Exception) {}
 
                 joinActiveRandomChat(simulatedChat)
@@ -3074,20 +3644,20 @@ class BlinkRepository(private val context: Context? = null) {
 
     private fun joinActiveRandomChat(chat: ActiveRandomChat) {
         matchingFallbackJob?.cancel()
-        queueListener?.remove()
+        queueListener?.let { (ref, listener) -> ref.removeEventListener(listener) }
         queueListener = null
 
-        // Remove from match queue
         myQueueEntryId?.let { entryId ->
             try {
-                firestoreDb?.collection("match_queue")?.document(entryId)?.delete()
+                rtdb?.let { db ->
+                    FirebaseRtdbManager.chatsRef(db).child("_match_queue").child(entryId).removeValue()
+                }
             } catch (_: Exception) {}
         }
 
         _activeRandomChat.value = chat
         _randomMatchState.value = MatchState.MATCHED
 
-        // Welcome system message
         val welcomeMsg = RandomChatMessage(
             id = "sys_welcome",
             chatId = chat.id,
@@ -3099,22 +3669,19 @@ class BlinkRepository(private val context: Context? = null) {
         )
         _randomChatMessages.value = listOf(welcomeMsg)
 
-        // Real-time Firestore snapshot listener on /active_chats/{chatId}/messages
-        val db = firestoreDb
+        // Real-time RTDB listener on messages/{chatId}
+        val db = rtdb
         if (db != null) {
             try {
-                messagesListener = db.collection("active_chats")
-                    .document(chat.id)
-                    .collection("messages")
-                    .orderBy("createdAt")
-                    .addSnapshotListener { snapshot, error ->
-                        if (error != null || snapshot == null) return@addSnapshotListener
-                        val remoteMessages = snapshot.documents.mapNotNull { doc ->
-                            val id = doc.getString("id") ?: doc.id
-                            val text = doc.getString("text") ?: return@mapNotNull null
-                            val senderId = doc.getString("senderId") ?: ""
-                            val senderName = doc.getString("senderAnonymousName") ?: "Anonymous"
-                            val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                val msgRef = FirebaseRtdbManager.chatMessagesRef(db, chat.id)
+                val msgListener = object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val remoteMessages = snapshot.children.mapNotNull { doc ->
+                            val id = doc.child("id").getValue(String::class.java) ?: doc.key ?: return@mapNotNull null
+                            val text = doc.child("text").getValue(String::class.java) ?: return@mapNotNull null
+                            val senderId = doc.child("senderId").getValue(String::class.java) ?: ""
+                            val senderName = doc.child("senderAnonymousName").getValue(String::class.java) ?: "Anonymous"
+                            val createdAt = (doc.child("createdAt").value as? Number)?.toLong() ?: System.currentTimeMillis()
                             RandomChatMessage(
                                 id = id,
                                 chatId = chat.id,
@@ -3124,7 +3691,8 @@ class BlinkRepository(private val context: Context? = null) {
                                 createdAt = createdAt,
                                 isFromMe = (senderId == anonymousUserId)
                             )
-                        }
+                        }.sortedBy { it.createdAt }
+
                         if (remoteMessages.isNotEmpty()) {
                             _randomChatMessages.update { current ->
                                 val existingIds = current.map { it.id }.toSet()
@@ -3134,21 +3702,30 @@ class BlinkRepository(private val context: Context? = null) {
                         }
                     }
 
-                // Listen to chat doc for skip/ended
-                chatDocListener = db.collection("active_chats").document(chat.id)
-                    .addSnapshotListener { doc, error ->
-                        if (error != null || doc == null || !doc.exists()) return@addSnapshotListener
-                        val status = doc.getString("status")
+                    override fun onCancelled(error: DatabaseError) {}
+                }
+                msgRef.orderByChild("createdAt").addValueEventListener(msgListener)
+                messagesListener = msgRef to msgListener
+
+                val chatRef = FirebaseRtdbManager.chatsRef(db).child(chat.id)
+                val cListener = object : ValueEventListener {
+                    override fun onDataChange(doc: DataSnapshot) {
+                        if (!doc.exists()) return
+                        val status = doc.child("status").getValue(String::class.java)
                         if (status == "skipped" && _activeRandomChat.value?.status == "active") {
                             _activeRandomChat.update { it?.copy(status = "skipped") }
                         }
                     }
+
+                    override fun onCancelled(error: DatabaseError) {}
+                }
+                chatRef.addValueEventListener(cListener)
+                chatDocListener = chatRef to cListener
             } catch (e: Exception) {
                 Log.w("BlinkRepo", "joinActiveRandomChat listener error: ${e.message}")
             }
         }
 
-        // If simulated partner, initiate greetings
         if (chat.participantB.startsWith("sim_peer_")) {
             scheduleSimulatedPartnerGreeting(chat)
         }
@@ -3196,27 +3773,25 @@ class BlinkRepository(private val context: Context? = null) {
 
         _randomChatMessages.update { it + newMsg }
 
-        // Write to Firestore /active_chats/{chatId}/messages
         try {
-            firestoreDb?.collection("active_chats")
-                ?.document(chat.id)
-                ?.collection("messages")
-                ?.document(newMsg.id)
-                ?.set(
-                    mapOf(
-                        "id" to newMsg.id,
-                        "chatId" to chat.id,
-                        "senderId" to anonymousUserId,
-                        "senderAnonymousName" to anonymousUserName,
-                        "text" to newMsg.text,
-                        "createdAt" to newMsg.createdAt
+            rtdb?.let { db ->
+                FirebaseRtdbManager.chatMessagesRef(db, chat.id)
+                    .child(newMsg.id)
+                    .setValue(
+                        mapOf(
+                            "id" to newMsg.id,
+                            "chatId" to chat.id,
+                            "senderId" to anonymousUserId,
+                            "senderAnonymousName" to anonymousUserName,
+                            "text" to newMsg.text,
+                            "createdAt" to newMsg.createdAt
+                        )
                     )
-                )
+            }
         } catch (e: Exception) {
-            Log.w("BlinkRepo", "Firestore random message write: ${e.message}")
+            Log.w("BlinkRepo", "RTDB random message write: ${e.message}")
         }
 
-        // If simulated partner, schedule conversational response
         if (chat.participantB.startsWith("sim_peer_")) {
             scope.launch {
                 delay(1500 + (text.length * 20L).coerceAtMost(2000L))
@@ -3248,13 +3823,15 @@ class BlinkRepository(private val context: Context? = null) {
         val currentChat = _activeRandomChat.value
         if (currentChat != null) {
             try {
-                firestoreDb?.collection("active_chats")
-                    ?.document(currentChat.id)
-                    ?.update("status", "skipped")
+                rtdb?.let { db ->
+                    FirebaseRtdbManager.chatsRef(db)
+                        .child(currentChat.id)
+                        .child("status")
+                        .setValue("skipped")
+                }
             } catch (_: Exception) {}
         }
         cleanUpRandomMatch()
-        // Immediately search for next random partner!
         startRandomMatch()
     }
 
@@ -3262,9 +3839,12 @@ class BlinkRepository(private val context: Context? = null) {
         val currentChat = _activeRandomChat.value
         if (currentChat != null) {
             try {
-                firestoreDb?.collection("active_chats")
-                    ?.document(currentChat.id)
-                    ?.update("status", "ended")
+                rtdb?.let { db ->
+                    FirebaseRtdbManager.chatsRef(db)
+                        .child(currentChat.id)
+                        .child("status")
+                        .setValue("ended")
+                }
             } catch (_: Exception) {}
         }
         cleanUpRandomMatch()
@@ -3276,23 +3856,25 @@ class BlinkRepository(private val context: Context? = null) {
     fun reportRandomChat(reason: String, details: String) {
         val currentChat = _activeRandomChat.value
         val peerName = if (currentChat?.participantA == anonymousUserId) currentChat.participantBName else (currentChat?.participantAName ?: "Anonymous")
-        
+
         try {
             val reportId = "rep_" + UUID.randomUUID().toString().take(8)
-            firestoreDb?.collection("reports")?.document(reportId)?.set(
-                mapOf(
-                    "id" to reportId,
-                    "targetType" to "random_chat",
-                    "chatId" to (currentChat?.id ?: ""),
-                    "reportedAnonymousUser" to peerName,
-                    "reporterAnonymousId" to anonymousUserId,
-                    "reason" to reason,
-                    "details" to details,
-                    "createdAt" to System.currentTimeMillis()
+            rtdb?.let { db ->
+                FirebaseRtdbManager.reportsRef(db).child(reportId).setValue(
+                    mapOf(
+                        "id" to reportId,
+                        "targetType" to "random_chat",
+                        "chatId" to (currentChat?.id ?: ""),
+                        "reportedAnonymousUser" to peerName,
+                        "reporterAnonymousId" to anonymousUserId,
+                        "reason" to reason,
+                        "details" to details,
+                        "createdAt" to System.currentTimeMillis()
+                    )
                 )
-            )
-            currentChat?.id?.let { cid ->
-                firestoreDb?.collection("active_chats")?.document(cid)?.update("status", "reported")
+                currentChat?.id?.let { cid ->
+                    FirebaseRtdbManager.chatsRef(db).child(cid).child("status").setValue("reported")
+                }
             }
         } catch (_: Exception) {}
 
@@ -3307,16 +3889,18 @@ class BlinkRepository(private val context: Context? = null) {
         matchingFallbackJob = null
         simulatedChatJob?.cancel()
         simulatedChatJob = null
-        queueListener?.remove()
+        queueListener?.let { (ref, listener) -> ref.removeEventListener(listener) }
         queueListener = null
-        messagesListener?.remove()
+        messagesListener?.let { (ref, listener) -> ref.removeEventListener(listener) }
         messagesListener = null
-        chatDocListener?.remove()
+        chatDocListener?.let { (ref, listener) -> ref.removeEventListener(listener) }
         chatDocListener = null
 
         myQueueEntryId?.let { entryId ->
             try {
-                firestoreDb?.collection("match_queue")?.document(entryId)?.delete()
+                rtdb?.let { db ->
+                    FirebaseRtdbManager.chatsRef(db).child("_match_queue").child(entryId).removeValue()
+                }
             } catch (_: Exception) {}
         }
         myQueueEntryId = null

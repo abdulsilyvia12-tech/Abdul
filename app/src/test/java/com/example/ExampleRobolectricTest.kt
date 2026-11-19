@@ -2,7 +2,12 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.cache.BlinkOfflineCache
+import com.example.data.firebase.FirebaseRtdbManager
+import com.example.data.model.ChatMessage
+import com.example.data.model.Conversation
 import com.example.data.model.ReportReason
+import com.example.data.model.User
 import com.example.data.repository.BlinkRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -43,7 +48,6 @@ class ExampleRobolectricTest {
         assertTrue(initialPosts.isNotEmpty())
 
         val firstPost = initialPosts.first()
-        val initialLikes = firstPost.likesCount
 
         // Toggle like
         repo.toggleLikePost(firstPost.id)
@@ -117,5 +121,98 @@ class ExampleRobolectricTest {
         repo.updateProfile("Alex Rivers", "Updated bio", "In Ghost Mode 👻", isGhostMode = true)
         assertTrue(repo.currentUser.value?.isGhostMode == true)
         assertTrue(repo.privacySettings.value.ghostMode)
+    }
+
+    @Test
+    fun `rtdb config schema nodes and canonical chat id symmetry`() {
+        assertEquals(
+            "https://blinkchat-8d1a7-default-rtdb.europe-west1.firebasedatabase.app",
+            FirebaseRtdbManager.DATABASE_URL
+        )
+        assertEquals("blinkchat-8d1a7", FirebaseRtdbManager.PROJECT_ID)
+        assertEquals("users", FirebaseRtdbManager.NODE_USERS)
+        assertEquals("chats", FirebaseRtdbManager.NODE_CHATS)
+        assertEquals("messages", FirebaseRtdbManager.NODE_MESSAGES)
+        assertEquals("blinks", FirebaseRtdbManager.NODE_BLINKS)
+        assertEquals("reports", FirebaseRtdbManager.NODE_REPORTS)
+
+        val chatAB = FirebaseRtdbManager.canonicalDirectChatId("phone_user_1", "phone_user_2")
+        val chatBA = FirebaseRtdbManager.canonicalDirectChatId("phone_user_2", "phone_user_1")
+        assertEquals(chatAB, chatBA)
+        assertEquals("dm_phone_user_1_phone_user_2", chatAB)
+
+        assertEquals("a_b_c_d_e", FirebaseRtdbManager.sanitizeKey("a.b#c\$d[e"))
+    }
+
+    @Test
+    fun `offline cache persists messages and conversations`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val cache = BlinkOfflineCache(context)
+        val convId = FirebaseRtdbManager.canonicalDirectChatId("user_alex", "user_zoe")
+        val conv = Conversation(
+            id = convId,
+            participantId = "user_zoe",
+            name = "Zoe",
+            username = "zoe_k",
+            avatarColorHex = "#06B6D4",
+            lastMessage = "Sync check!",
+            lastMessageTime = "10:15 PM",
+            isOnline = true
+        )
+        val msg = ChatMessage(
+            id = "msg_persist_1",
+            conversationId = convId,
+            senderId = "user_alex",
+            senderName = "Alex",
+            text = "Sync check!",
+            timestamp = 1700000000000L,
+            timeFormatted = "10:15 PM",
+            isFromMe = true,
+            reactions = mapOf("🔥" to listOf("user_zoe"))
+        )
+
+        cache.saveOfflineState(
+            currentUser = null,
+            posts = emptyList(),
+            stories = emptyList(),
+            conversations = listOf(conv),
+            messages = mapOf(convId to listOf(msg)),
+            customers = emptyList(),
+            payments = emptyList()
+        )
+
+        val reloadedCache = BlinkOfflineCache(context)
+        val loadedConvs = reloadedCache.loadCachedConversations()
+        val loadedMessages = reloadedCache.loadCachedMessages()
+        assertNotNull(loadedConvs)
+        assertNotNull(loadedMessages)
+        assertTrue(loadedConvs!!.any { it.id == convId && it.lastMessage == "Sync check!" })
+        val persistedMsg = loadedMessages!![convId]?.firstOrNull()
+        assertNotNull(persistedMsg)
+        assertEquals("Sync check!", persistedMsg?.text)
+        assertEquals(listOf("user_zoe"), persistedMsg?.reactions?.get("🔥"))
+    }
+
+    @Test
+    fun `repository resolves canonical direct chat and persists messages`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = BlinkRepository(context)
+        val target = User(
+            id = "phone_two_user",
+            username = "phone_two",
+            displayName = "Phone Two",
+            email = "two@blinkchat.com"
+        )
+        val chat = repo.getOrCreateDirectChat(target)
+        val expectedId = FirebaseRtdbManager.canonicalDirectChatId(
+            repo.currentUser.value!!.id,
+            target.id
+        )
+        assertEquals(expectedId, chat.id)
+
+        repo.sendMessage(chat.id, "Hello across phones!", messageId = "msg_cross_1")
+        val saved = repo.messages.value[chat.id]?.find { it.id == "msg_cross_1" }
+        assertNotNull(saved)
+        assertEquals("Hello across phones!", saved?.text)
     }
 }

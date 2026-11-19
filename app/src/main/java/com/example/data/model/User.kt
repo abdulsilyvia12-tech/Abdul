@@ -8,9 +8,9 @@ data class User(
     val avatarUrl: String? = null,
     val avatarColorHex: String = "#8B5CF6",
     val bio: String = "Living in the blink of an eye ✨",
-    val streaksCount: Int = 12,
-    val postsCount: Int = 8,
-    val friendsCount: Int = 142,
+    val streaksCount: Int = 0,
+    val postsCount: Int = 0,
+    val friendsCount: Int = 0,
     val statusText: String = "Available ⚡",
     val location: String = "Tokyo, Japan",
     val coordinates: String = "35.6762° N, 139.6503° E",
@@ -25,8 +25,8 @@ data class User(
     val vipBadge: String = "⚡ VIP Creator",
     val profileLevel: Int = 5,
     val profileXp: Int = 850,
-    val followersCount: Int = 384,
-    val followingCount: Int = 182,
+    val followersCount: Int = 0,
+    val followingCount: Int = 0,
     val isVerified: Boolean = false,
     val socialLinks: List<String> = listOf("instagram.com/blink", "tiktok.com/@blink", "youtube.com/@blink")
 )

@@ -208,7 +208,7 @@ fun RandomBlinkSearchingDialog(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = "Scanning live Firestore queue for random Blink partners worldwide",
+                    text = "Scanning live Realtime Database queue for random Blink partners worldwide",
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

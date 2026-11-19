@@ -56,6 +56,7 @@ fun ChatListScreen(
     onAcceptRequest: (User) -> Unit,
     onBlockUser: (User) -> Unit,
     friendRequests: List<com.example.data.model.FriendRequest> = emptyList(),
+    blockedUsers: List<com.example.data.model.BlockedUser> = emptyList(),
     onSearchUsers: ((String) -> List<User>)? = null,
     onSendFriendRequest: ((User) -> Boolean)? = null,
     onAcceptFriendRequest: ((String) -> Boolean)? = null,
@@ -84,15 +85,25 @@ fun ChatListScreen(
     val isMusicMuted by BlinkMusicPlayer.isMuted.collectAsState()
     val currentMusicTrack by BlinkMusicPlayer.currentTrack.collectAsState()
 
+    val blockedUserIds = remember(blockedUsers) { blockedUsers.map { it.userId }.toSet() }
+    val blockedUsernames = remember(blockedUsers) { blockedUsers.map { it.username.lowercase() }.toSet() }
+
     // Filter conversations
-    val filteredConversations = conversations.filter {
-        it.name.contains(searchQuery, ignoreCase = true) ||
-        it.username.contains(searchQuery, ignoreCase = true) ||
-        it.lastMessage.contains(searchQuery, ignoreCase = true)
+    val filteredConversations = conversations.filter { conv ->
+        val notBlocked = conv.participantId !in blockedUserIds && conv.username.lowercase() !in blockedUsernames
+        notBlocked && (
+            conv.name.contains(searchQuery, ignoreCase = true) ||
+            conv.username.contains(searchQuery, ignoreCase = true) ||
+            conv.lastMessage.contains(searchQuery, ignoreCase = true)
+        )
     }
 
     // Filter people for Find Friends
-    val candidateUsers = allUsers.filter { it.id != currentUser?.id }
+    val candidateUsers = allUsers.filter { user ->
+        user.id != currentUser?.id &&
+            user.id !in blockedUserIds &&
+            user.username.lowercase() !in blockedUsernames
+    }
     val filteredPeople = candidateUsers.filter {
         it.displayName.contains(searchQuery, ignoreCase = true) ||
         it.username.contains(searchQuery, ignoreCase = true) ||
@@ -484,11 +495,12 @@ fun ChatListScreen(
                     }
 
                     // SEARCH RESULTS: Matching Active Conversations
-                    if (filteredConversations.isNotEmpty()) {
+                    val nonAiConversations = filteredConversations.filter { !it.isAiBot }
+                    if (nonAiConversations.isNotEmpty()) {
                         if (searchQuery.isNotBlank()) {
                             item {
                                 Text(
-                                    text = "💬 Chats (${filteredConversations.size})",
+                                    text = "💬 Chats (${nonAiConversations.size})",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -496,11 +508,51 @@ fun ChatListScreen(
                                 )
                             }
                         }
-                        items(filteredConversations.filter { !it.isAiBot }, key = { it.id }) { conv ->
+                        items(nonAiConversations, key = { it.id }) { conv ->
                             ConversationItem(
                                 conversation = conv,
                                 onClick = { onSelectConversation(conv) }
                             )
+                        }
+                    } else if (searchQuery.isBlank()) {
+                        item {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 18.dp, horizontal = 4.dp)
+                                    .testTag("empty_conversations_state"),
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.ChatBubbleOutline,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "No friend conversations yet",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Pick a friend above or tap New Chat to start a conversation.",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -692,17 +744,55 @@ fun ChatListScreen(
 
                     if (displayList.isEmpty()) {
                         item {
-                            Box(
+                            val (emptyIcon, emptyTitle, emptySubtitle) = when {
+                                searchQuery.isNotBlank() -> Triple(
+                                    Icons.Default.SearchOff,
+                                    "No users matching \"$searchQuery\"",
+                                    "Try searching another name, @username, or city."
+                                )
+                                activePeopleSubTab == PeopleSubTab.MY_FRIENDS -> Triple(
+                                    Icons.Outlined.Group,
+                                    "No friends added yet",
+                                    "Accept a request or tap Add Friend in Worldwide to connect."
+                                )
+                                activePeopleSubTab == PeopleSubTab.WORLDWIDE_PEOPLE -> Triple(
+                                    Icons.Outlined.Public,
+                                    "No people available right now",
+                                    "Check back soon to discover more people worldwide."
+                                )
+                                else -> Triple(
+                                    Icons.Outlined.PersonAdd,
+                                    "No pending friend requests",
+                                    "New friend requests from people on Blinkchat will appear here."
+                                )
+                            }
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 40.dp),
-                                contentAlignment = Alignment.Center
+                                    .padding(vertical = 40.dp, horizontal = 20.dp)
+                                    .testTag("people_empty_state"),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
+                                Icon(
+                                    imageVector = emptyIcon,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(40.dp)
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
                                 Text(
-                                    text = if (searchQuery.isNotBlank()) "No users matching \"$searchQuery\""
-                                           else "No pending requests right now ✨",
+                                    text = emptyTitle,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 14.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = emptySubtitle,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 13.sp
+                                    fontSize = 12.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                 )
                             }
                         }
@@ -892,7 +982,7 @@ fun ChatListScreen(
             }
         }
 
-        // --- Create Group Chat Modal (Firestore Backed) ---
+        // --- Create Group Chat Modal (Realtime Database Backed) ---
         if (showCreateGroupDialog) {
             AlertDialog(
                 onDismissRequest = { showCreateGroupDialog = false },
@@ -909,7 +999,7 @@ fun ChatListScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "Name your group room and pick friends to join in real-time Firestore conversation:",
+                            text = "Name your group room and pick friends to join in real-time Realtime Database conversation:",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
