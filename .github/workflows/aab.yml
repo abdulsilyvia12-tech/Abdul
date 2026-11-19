@@ -13,14 +13,14 @@ env:
 
 jobs:
   build-aab:
-    name: Build Android App Bundle (AAB)
+    name: Build Android App Bundle
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Detect project type (Capacitor vs Native Android)
+      - name: Detect project type
         id: project_type
         run: |
           if [ -f "package.json" ]; then
@@ -45,16 +45,12 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # --- Capacitor Web + Android AAB Pipeline ---
-      - name: Install dependencies and build web bundle (Capacitor)
+      # --- Capacitor build flow (when package.json is present) ---
+      - name: Build web app & sync Capacitor Android
         if: steps.project_type.outputs.is_capacitor == 'true'
         run: |
           npm install
           npm run build
-
-      - name: Initialize & sync Capacitor Android project
-        if: steps.project_type.outputs.is_capacitor == 'true'
-        run: |
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
             WEB_DIR="dist"
             if [ -d "build" ] && [ ! -d "dist" ]; then
@@ -67,16 +63,15 @@ jobs:
           fi
           npx cap sync android
 
-      - name: Build Android AAB via Capacitor
+      - name: Build Capacitor AAB
         if: steps.project_type.outputs.is_capacitor == 'true'
         env:
-          KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd android
           chmod +x gradlew
-          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ] && [ -n "${{ secrets.STORE_PASSWORD }}" ] && [ -n "${{ secrets.KEY_PASSWORD }}" ]; then
             echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > app/upload-keystore.jks
             ./gradlew bundleRelease \
               -Pandroid.injected.signing.store.file="$(pwd)/app/upload-keystore.jks" \
@@ -84,17 +79,17 @@ jobs:
               -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS || 'upload' }}" \
               -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
           else
-            ./gradlew bundleRelease || ./gradlew bundleDebug
+            ./gradlew bundleDebug
           fi
 
-      # --- Native Android Gradle AAB Fallback (when no package.json exists) ---
-      - name: Setup Gradle (Native Android)
+      # --- Native Android Gradle flow (current repository layout) ---
+      - name: Setup Gradle
         if: steps.project_type.outputs.is_capacitor == 'false'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
-      - name: Build Android AAB via Gradle (Native Android)
+      - name: Build Native Android AAB
         if: steps.project_type.outputs.is_capacitor == 'false'
         env:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
@@ -108,7 +103,6 @@ jobs:
             export KEYSTORE_PATH="$(pwd)/my-upload-key.jks"
             gradle bundleRelease --no-daemon
           else
-            echo "Release keystore secrets not set; building debug AAB bundle."
             gradle bundleDebug --no-daemon
           fi
 
